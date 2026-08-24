@@ -31,6 +31,7 @@ class MotionController {
   static constexpr uint32_t kHomingTimeoutMs = 15000;
   static constexpr uint32_t kBackoffTimeoutMs = 2000;
   static constexpr uint32_t kEncoderSampleMs = 5;
+  static constexpr uint8_t kEncoderFailureThreshold = 5;
   static constexpr uint32_t kTelemetrySampleMs = 500;
   static constexpr uint32_t kTmcProbeMs = 500;
   static constexpr uint8_t kExpectedTmcVersion = 0x21;
@@ -52,6 +53,8 @@ class MotionController {
   void setDirectionPolarity();
 
   bool readEncoder();
+  bool captureEncoderAfterStop();
+  bool samplePowerGood();
   void updateFastTelemetry(uint32_t now);
   void updateSlowTelemetry(uint32_t now);
   void probeTmc(uint32_t now);
@@ -68,7 +71,8 @@ class MotionController {
   void processMotion(uint32_t now);
   void processRollingHardStop(uint32_t now);
 
-  void enableDriver();
+  bool enableDriver();
+  void handlePowerLoss();
   void stopMotionAndResynchronize();
   void disableDriver(bool invalidate_home);
   void enterFault(FaultCode code, FaultReason reason);

@@ -19,7 +19,9 @@ The project pins the ESP32 Arduino toolchain and motion/driver/network dependenc
 - Homing uses the fixed known-good profile from the concept document and independently limits each seek to 500 mm and 15 seconds.
 - Detected physical endpoints are measured from the unwrapped AS5600 values. The normal commandable range keeps 5 mm away from each physical endpoint.
 - DIAG and power-good loss immediately disable EN and force-stop FastAccelStepper. The queued step position is then replaced with an encoder-derived position.
+- PG is sampled directly before and after every EN activation. An enabled driver can never coexist with bad PG in the controller state; a missed edge is caught by the main-loop invariant and latches `POWER_LOSS`.
 - A rolling 125 ms comparison trips when commanded movement exceeds observed shaft movement by at least 164 AS5600 counts. Error is never accumulated across windows.
+- Five consecutive AS5600 sample failures (about 25 ms) latch `ENCODER_FAULT` whenever the controller is homed or the driver is enabled. New move and velocity commands are rejected while the latest encoder sample is invalid.
 - The TMC2209 UART is checked at startup and every 500 ms using CRC-checked register reads, chip version, a readable driver status, and IFCNT write acknowledgement. Two consecutive failures latch `TMC_COMM`.
 - Faults are latched. Fault reset leaves the motor disabled and unhomed; a new controlled home is also allowed for recoverable obstruction/homing faults.
 
@@ -53,7 +55,7 @@ curl -X POST http://CONTROLLER_IP/api/command \
   -d '{"action":"velocity","velocity_mm_s":-15}'
 ```
 
-Position move speed and acceleration default to 40 mm/s and 75 mm/s² and may be reduced per command. Velocity magnitude is limited to 40 mm/s. Velocity mode stops at the calibrated soft limit.
+Position move speed and acceleration default to 40 mm/s and 75 mm/s² and may be reduced per command. Velocity magnitude is limited to 40 mm/s. Velocity mode force-stops and resynchronizes at the calibrated soft limit, returns to `IDLE`, keeps homing valid, and does not raise `TRAVEL_LIMIT`.
 
 ### Stop, enable, disable, and reset
 

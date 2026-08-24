@@ -34,6 +34,33 @@ int32_t microstepsToEncoderCounts(int32_t microsteps, uint16_t microsteps_per_st
       static_cast<double>(kFullStepsPerRevolution * microsteps_per_step)));
 }
 
+SoftLimitAction evaluateSoftLimit(bool velocity_mode, int8_t direction,
+                                  float encoder_position_mm,
+                                  float commanded_position_mm, float soft_min_mm,
+                                  float soft_max_mm) {
+  const bool reached =
+      (direction < 0 &&
+       (encoder_position_mm <= soft_min_mm || commanded_position_mm <= soft_min_mm)) ||
+      (direction > 0 &&
+       (encoder_position_mm >= soft_max_mm || commanded_position_mm >= soft_max_mm));
+  if (!reached) return SoftLimitAction::kNone;
+  return velocity_mode ? SoftLimitAction::kStopVelocity : SoftLimitAction::kFault;
+}
+
+bool powerGoodInvariantViolated(bool driver_enabled, bool power_good) {
+  return driver_enabled && !power_good;
+}
+
+bool encoderLossRequiresFault(bool homed, bool driver_enabled,
+                              uint8_t consecutive_failures,
+                              uint8_t failure_threshold) {
+  return (homed || driver_enabled) && consecutive_failures >= failure_threshold;
+}
+
+bool closedLoopMotionReady(bool homed, bool encoder_valid) {
+  return homed && encoder_valid;
+}
+
 void EncoderUnwrapper::reset(uint16_t raw_count) {
   initialized_ = true;
   previous_raw_ = raw_count & 0x0FFFU;

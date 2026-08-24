@@ -66,7 +66,7 @@ bool MotionController::begin() {
   attachInterruptArg(digitalPinToInterrupt(pins::kDiag), diagIsr, this, RISING);
   attachInterruptArg(digitalPinToInterrupt(pins::kPowerGood), powerGoodIsr, this, RISING);
 
-  power_good_ = digitalRead(pins::kPowerGood) == LOW;
+  samplePowerGood();
   mode_ = MotionMode::kDisabled;
   updateFastTelemetry(millis());
   updateSlowTelemetry(millis());
@@ -213,6 +213,7 @@ void IRAM_ATTR MotionController::powerGoodIsr(void* argument) {
 void IRAM_ATTR MotionController::emergencyIsr(volatile bool& flag) {
   digitalWrite(pins::kTmcEnable, HIGH);
   if (stepper_ != nullptr) stepper_->forceStop();
+  driver_enabled_ = false;
   motion_armed_ = false;
   portENTER_CRITICAL_ISR(&data_mux_);
   flag = true;
@@ -221,7 +222,12 @@ void IRAM_ATTR MotionController::emergencyIsr(volatile bool& flag) {
 
 void MotionController::tick() {
   const uint32_t now = millis();
-  power_good_ = digitalRead(pins::kPowerGood) == LOW;
+  samplePowerGood();
+  if (core::powerGoodInvariantViolated(driver_enabled_, power_good_)) {
+    handlePowerLoss();
+    updateSnapshot();
+    return;
+  }
 
   if (now - last_encoder_sample_ms_ >= kEncoderSampleMs) {
     last_encoder_sample_ms_ = now;
@@ -236,7 +242,8 @@ void MotionController::tick() {
   processEmergencyEvents();
   processUrgentRequests();
 
-  if (isMoving() && encoder_read_failures_ >= 5) {
+  if (core::encoderLossRequiresFault(homed_, driver_enabled_, encoder_read_failures_,
+                                     kEncoderFailureThreshold)) {
     enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
   }
 
@@ -264,6 +271,22 @@ bool MotionController::readEncoder() {
   encoder_counts_ = encoder_unwrapper_.update(encoder_raw_);
   encoder_valid_ = true;
   return true;
+}
+
+bool MotionController::captureEncoderAfterStop() {
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    if (readEncoder()) {
+      encoder_read_failures_ = 0;
+      return true;
+    }
+    if (attempt < 2) delayMicroseconds(250);
+  }
+  return false;
+}
+
+bool MotionController::samplePowerGood() {
+  power_good_ = digitalRead(pins::kPowerGood) == LOW;
+  return power_good_;
 }
 
 void MotionController::updateFastTelemetry(uint32_t now) {
@@ -407,22 +430,15 @@ void MotionController::processEmergencyEvents() {
   diag_event_ = false;
   portEXIT_CRITICAL(&data_mux_);
 
-  if (power_event || diag_event) {
-    // Capture the first usable shaft position after STEP generation and EN were
-    // stopped by the ISR. This is the reference used to repair FAS's position.
-    for (uint8_t attempt = 0; attempt < 3 && !readEncoder(); ++attempt) {
-      delayMicroseconds(250);
-    }
-  }
-
   if (power_event) {
-    driver_enabled_ = false;
-    resynchronizeStepperFromEncoder(0.0F, false);
-    enterFault(FaultCode::kPowerLoss, FaultReason::kPowerGoodLost);
+    handlePowerLoss();
     return;
   }
 
   if (diag_event) {
+    // Capture the first usable shaft position after STEP generation and EN were
+    // stopped by the ISR. This is the reference used to repair FAS's position.
+    captureEncoderAfterStop();
     driver_enabled_ = false;
     resynchronizeStepperFromEncoder(0.0F, false);
     if (!encoder_valid_) enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
@@ -510,8 +526,10 @@ void MotionController::processPendingRequest() {
                      : FaultReason::kShortCircuit);
       return;
     }
-    power_good_ = digitalRead(pins::kPowerGood) == LOW;
-    if (was_enabled && !invalidates_home && power_good_ && tmc_uart_ok_) enableDriver();
+    samplePowerGood();
+    if (was_enabled && !invalidates_home && tmc_uart_ok_ && !enableDriver()) {
+      return;
+    }
     mode_ = driver_enabled_ ? MotionMode::kIdle : MotionMode::kDisabled;
     return;
   }
@@ -523,14 +541,17 @@ void MotionController::processPendingRequest() {
     case CommandType::kVelocity: startVelocityMove(command); break;
     case CommandType::kEnable:
       if ((mode_ == MotionMode::kDisabled || mode_ == MotionMode::kIdle) &&
-          power_good_ && fault_ == FaultCode::kNone) {
+          fault_ == FaultCode::kNone) {
+        if (!samplePowerGood()) {
+          handlePowerLoss();
+          break;
+        }
         probeTmc(millis());
       }
       if ((mode_ == MotionMode::kDisabled || mode_ == MotionMode::kIdle) &&
-          power_good_ && tmc_uart_ok_ && fault_ == FaultCode::kNone &&
+          tmc_uart_ok_ && fault_ == FaultCode::kNone &&
           (tmc_status_raw_ & kTmcSeriousFaultMask) == 0) {
-        enableDriver();
-        mode_ = MotionMode::kIdle;
+        if (enableDriver()) mode_ = MotionMode::kIdle;
       } else if (tmc_uart_ok_ && (tmc_status_raw_ & kTmcSeriousFaultMask) != 0) {
         enterFault(FaultCode::kTmcDriver,
                    (tmc_status_raw_ & 0x02U) != 0
@@ -598,10 +619,15 @@ void MotionController::processMotion(uint32_t now) {
     const int8_t direction = currentMotionDirection();
     const float encoder_position = encoderPositionMm();
     const float step_position = commandedPositionMm();
-    if ((direction < 0 && (encoder_position < kSoftMarginMm || step_position < kSoftMarginMm)) ||
-        (direction > 0 &&
-         (encoder_position > travel_mm_ - kSoftMarginMm ||
-          step_position > travel_mm_ - kSoftMarginMm))) {
+    const core::SoftLimitAction action = core::evaluateSoftLimit(
+        mode_ == MotionMode::kVelocity, direction, encoder_position, step_position,
+        kSoftMarginMm, travel_mm_ - kSoftMarginMm);
+    if (action == core::SoftLimitAction::kStopVelocity) {
+      stopMotionAndResynchronize();
+      mode_ = MotionMode::kIdle;
+      return;
+    }
+    if (action == core::SoftLimitAction::kFault) {
       enterFault(FaultCode::kTravelLimit, FaultReason::kSoftLimitCrossed);
     }
   }
@@ -628,10 +654,41 @@ void MotionController::processRollingHardStop(uint32_t now) {
   }
 }
 
-void MotionController::enableDriver() {
-  if (stepper_ == nullptr || !power_good_ || !tmc_uart_ok_) return;
+bool MotionController::enableDriver() {
+  if (stepper_ == nullptr || !tmc_uart_ok_) return false;
+
+  // PG may change after an earlier state snapshot. Check it directly before EN,
+  // immediately after EN, and once more after publishing the enabled state.
+  if (!samplePowerGood()) {
+    handlePowerLoss();
+    return false;
+  }
   stepper_->enableOutputs();
+  if (!samplePowerGood()) {
+    handlePowerLoss();
+    return false;
+  }
   driver_enabled_ = true;
+  if (!samplePowerGood()) {
+    handlePowerLoss();
+    return false;
+  }
+  return driver_enabled_;
+}
+
+void MotionController::handlePowerLoss() {
+  portENTER_CRITICAL(&data_mux_);
+  power_event_ = false;
+  portEXIT_CRITICAL(&data_mux_);
+
+  digitalWrite(pins::kTmcEnable, HIGH);
+  if (stepper_ != nullptr) stepper_->forceStop();
+  driver_enabled_ = false;
+  motion_armed_ = false;
+  samplePowerGood();
+  captureEncoderAfterStop();
+  resynchronizeStepperFromEncoder(0.0F, false);
+  enterFault(FaultCode::kPowerLoss, FaultReason::kPowerGoodLost);
 }
 
 void MotionController::stopMotionAndResynchronize() {
@@ -717,7 +774,7 @@ bool MotionController::startHome() {
   fault_reason_ = FaultReason::kNone;
   applyPdVoltage(15);
   delay(300);
-  power_good_ = digitalRead(pins::kPowerGood) == LOW;
+  samplePowerGood();
   if (!power_good_) {
     enterFault(FaultCode::kPowerLoss, FaultReason::kPowerGoodLost);
     return false;
@@ -740,7 +797,7 @@ bool MotionController::startHome() {
   stepper_->forceStopAndNewPosition(0);
   target_position_mm_ = 0.0F;
   setSynchronizationAnchor(0.0F);
-  enableDriver();
+  if (!enableDriver()) return false;
   startHomingLeg(MotionMode::kHomingMin, -1);
   return true;
 }
@@ -772,7 +829,7 @@ void MotionController::handleHomingDiag() {
     stepper_->forceStopAndNewPosition(0);
     target_position_mm_ = 0.0F;
     setSynchronizationAnchor(0.0F);
-    enableDriver();
+    if (!enableDriver()) return;
     startBackoff(MotionMode::kBackoffMin, kSoftMarginMm);
     return;
   }
@@ -788,7 +845,7 @@ void MotionController::handleHomingDiag() {
     stepper_->forceStopAndNewPosition(core::millimetresToMicrosteps(travel_mm_, 4));
     target_position_mm_ = travel_mm_;
     setSynchronizationAnchor(travel_mm_);
-    enableDriver();
+    if (!enableDriver()) return;
     startBackoff(MotionMode::kBackoffMax, travel_mm_ - kSoftMarginMm);
     return;
   }
@@ -827,7 +884,7 @@ void MotionController::finishHoming() {
   active_microsteps_ = config_.microsteps;
   applyTmcConfig(config_);
   setDirectionPolarity();
-  power_good_ = digitalRead(pins::kPowerGood) == LOW;
+  samplePowerGood();
   if (!power_good_) {
     enterFault(FaultCode::kPowerLoss, FaultReason::kPowerGoodLost);
     return;
@@ -848,7 +905,7 @@ void MotionController::finishHoming() {
       core::millimetresToMicrosteps(final_position, active_microsteps_));
   homed_ = true;
   setSynchronizationAnchor(final_position);
-  enableDriver();
+  if (!enableDriver()) return;
   target_position_mm_ = final_position;
   fault_ = FaultCode::kNone;
   fault_reason_ = FaultReason::kNone;
@@ -856,9 +913,12 @@ void MotionController::finishHoming() {
 }
 
 void MotionController::startPositionMove(const Command& command) {
-  if (!homed_ || fault_ != FaultCode::kNone || mode_ != MotionMode::kIdle) return;
+  if (!core::closedLoopMotionReady(homed_, encoder_valid_) ||
+      fault_ != FaultCode::kNone || mode_ != MotionMode::kIdle) {
+    return;
+  }
   setMotionProfile(command.speed_mm_s, command.acceleration_mm_s2);
-  enableDriver();
+  if (!enableDriver()) return;
   target_position_mm_ = command.position_mm;
   requested_velocity_mm_s_ = command.position_mm > encoderPositionMm()
                                  ? command.speed_mm_s
@@ -875,9 +935,12 @@ void MotionController::startPositionMove(const Command& command) {
 }
 
 void MotionController::startVelocityMove(const Command& command) {
-  if (!homed_ || fault_ != FaultCode::kNone || mode_ != MotionMode::kIdle) return;
+  if (!core::closedLoopMotionReady(homed_, encoder_valid_) ||
+      fault_ != FaultCode::kNone || mode_ != MotionMode::kIdle) {
+    return;
+  }
   setMotionProfile(std::fabs(command.velocity_mm_s), command.acceleration_mm_s2);
-  enableDriver();
+  if (!enableDriver()) return;
   requested_velocity_mm_s_ = command.velocity_mm_s;
   target_position_mm_ = command.velocity_mm_s > 0 ? travel_mm_ - kSoftMarginMm
                                                   : kSoftMarginMm;
@@ -924,6 +987,13 @@ bool MotionController::submitCommand(const Command& command, const char*& error_
   if (pending_command_ || pending_config_) {
     portEXIT_CRITICAL(&data_mux_);
     error_code = "BUSY";
+    return false;
+  }
+
+  if ((command.type == CommandType::kMove || command.type == CommandType::kVelocity) &&
+      !published.encoder_valid) {
+    portEXIT_CRITICAL(&data_mux_);
+    error_code = "ENCODER_NOT_READY";
     return false;
   }
 

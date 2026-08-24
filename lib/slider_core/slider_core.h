@@ -11,11 +11,26 @@ constexpr int32_t kFullStepsPerRevolution = 200;
 constexpr float kMillimetresPerRevolution = 40.0F;
 constexpr int32_t kHardStopErrorCounts = 164;
 
+enum class SoftLimitAction : uint8_t {
+  kNone,
+  kStopVelocity,
+  kFault,
+};
+
 float encoderCountsToMillimetres(int32_t counts);
 int32_t millimetresToEncoderCounts(float millimetres);
 float microstepsToMillimetres(int32_t microsteps, uint16_t microsteps_per_step);
 int32_t millimetresToMicrosteps(float millimetres, uint16_t microsteps_per_step);
 int32_t microstepsToEncoderCounts(int32_t microsteps, uint16_t microsteps_per_step);
+SoftLimitAction evaluateSoftLimit(bool velocity_mode, int8_t direction,
+                                  float encoder_position_mm,
+                                  float commanded_position_mm, float soft_min_mm,
+                                  float soft_max_mm);
+bool powerGoodInvariantViolated(bool driver_enabled, bool power_good);
+bool encoderLossRequiresFault(bool homed, bool driver_enabled,
+                              uint8_t consecutive_failures,
+                              uint8_t failure_threshold);
+bool closedLoopMotionReady(bool homed, bool encoder_valid);
 
 class EncoderUnwrapper {
  public:

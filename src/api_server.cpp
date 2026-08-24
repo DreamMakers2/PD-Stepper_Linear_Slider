@@ -16,6 +16,7 @@ int controllerErrorStatus(const char* code) {
       strcmp(code, "OUTSIDE_SOFT_LIMITS") == 0 ||
       strcmp(code, "FAULT_RESET_REQUIRED") == 0 ||
       strcmp(code, "POWER_NOT_GOOD") == 0 || strcmp(code, "TMC_NOT_READY") == 0 ||
+      strcmp(code, "ENCODER_NOT_READY") == 0 ||
       strcmp(code, "NO_ACTIVE_FAULT") == 0) {
     return 409;
   }

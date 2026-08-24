@@ -5,6 +5,7 @@
 using slider::core::EncoderUnwrapper;
 using slider::core::MotionSample;
 using slider::core::RollingMotionMonitor;
+using slider::core::SoftLimitAction;
 using slider::core::SynchronizationAnchor;
 
 void test_physical_unit_conversions() {
@@ -92,6 +93,52 @@ void test_rolling_monitor_handles_negative_motion() {
   TEST_ASSERT_TRUE(tripped);
 }
 
+void test_velocity_mode_stops_cleanly_at_either_soft_limit() {
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(SoftLimitAction::kStopVelocity),
+      static_cast<uint8_t>(slider::core::evaluateSoftLimit(
+          true, 1, 464.9F, 465.0F, 5.0F, 465.0F)));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(SoftLimitAction::kStopVelocity),
+      static_cast<uint8_t>(slider::core::evaluateSoftLimit(
+          true, -1, 5.0F, 5.1F, 5.0F, 465.0F)));
+}
+
+void test_position_overrun_remains_a_travel_limit_fault() {
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(SoftLimitAction::kFault),
+      static_cast<uint8_t>(slider::core::evaluateSoftLimit(
+          false, 1, 465.1F, 465.0F, 5.0F, 465.0F)));
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(SoftLimitAction::kNone),
+      static_cast<uint8_t>(slider::core::evaluateSoftLimit(
+          false, -1, 20.0F, 20.0F, 5.0F, 465.0F)));
+}
+
+void test_bad_power_good_faults_exactly_when_driver_is_enabled() {
+  TEST_ASSERT_TRUE(slider::core::powerGoodInvariantViolated(true, false));
+  TEST_ASSERT_FALSE(slider::core::powerGoodInvariantViolated(false, false));
+  TEST_ASSERT_FALSE(slider::core::powerGoodInvariantViolated(true, true));
+}
+
+void test_sustained_encoder_loss_faults_when_homed_or_enabled() {
+  constexpr uint8_t threshold = 5;
+  TEST_ASSERT_FALSE(
+      slider::core::encoderLossRequiresFault(true, false, threshold - 1, threshold));
+  TEST_ASSERT_TRUE(
+      slider::core::encoderLossRequiresFault(true, false, threshold, threshold));
+  TEST_ASSERT_TRUE(
+      slider::core::encoderLossRequiresFault(false, true, threshold, threshold));
+  TEST_ASSERT_FALSE(
+      slider::core::encoderLossRequiresFault(false, false, threshold, threshold));
+}
+
+void test_closed_loop_motion_requires_a_currently_valid_encoder() {
+  TEST_ASSERT_TRUE(slider::core::closedLoopMotionReady(true, true));
+  TEST_ASSERT_FALSE(slider::core::closedLoopMotionReady(true, false));
+  TEST_ASSERT_FALSE(slider::core::closedLoopMotionReady(false, true));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_physical_unit_conversions);
@@ -103,5 +150,10 @@ int main(int, char**) {
   RUN_TEST(test_rolling_monitor_does_not_accumulate_across_windows);
   RUN_TEST(test_rolling_monitor_resets_on_reversal);
   RUN_TEST(test_rolling_monitor_handles_negative_motion);
+  RUN_TEST(test_velocity_mode_stops_cleanly_at_either_soft_limit);
+  RUN_TEST(test_position_overrun_remains_a_travel_limit_fault);
+  RUN_TEST(test_bad_power_good_faults_exactly_when_driver_is_enabled);
+  RUN_TEST(test_sustained_encoder_loss_faults_when_homed_or_enabled);
+  RUN_TEST(test_closed_loop_motion_requires_a_currently_valid_encoder);
   return UNITY_END();
 }
