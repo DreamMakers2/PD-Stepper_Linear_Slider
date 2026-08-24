@@ -1,0 +1,5 @@
+.pio/
+.vscode/
+.idea/
+.cache/
+include/wifi_config.h
