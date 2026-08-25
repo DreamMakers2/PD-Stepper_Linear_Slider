@@ -414,8 +414,9 @@ void MotionController::processEmergencyEvents() {
     driver_enabled_ = false;
     resynchronizeStepperFromEncoder(0.0F, false);
     if (!encoder_valid_) enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
-    else if (isHoming()) handleHomingDiag();
-    else enterFault(FaultCode::kUnexpectedStall, FaultReason::kInvalidDiag);
+    else if (isHoming()) {
+      if (checkTmc()) handleHomingDiag();
+    } else enterFault(FaultCode::kUnexpectedStall, FaultReason::kInvalidDiag);
   }
 }
 
@@ -687,6 +688,7 @@ void MotionController::enterFault(FaultCode code, FaultReason reason) {
 }
 
 void MotionController::clearFault() {
+  if (stepper_ == nullptr) return;
   stopMotionAndResynchronize();
   disableDriver(true);
   if (!checkTmc()) return;
@@ -696,7 +698,7 @@ void MotionController::clearFault() {
 }
 
 bool MotionController::startHome() {
-  if (isMoving()) return false;
+  if (stepper_ == nullptr || isMoving()) return false;
   if (!canHomeFromFault(fault_)) return false;
   if (!encoder_valid_) {
     enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);

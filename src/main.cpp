@@ -2,6 +2,7 @@
 #include <WiFi.h>
 
 #include "api_server.h"
+#include "board_pins.h"
 #include "motion_controller.h"
 #include "wifi_config.h"
 
@@ -43,6 +44,8 @@ void startWifi() {
 }  // namespace
 
 void setup() {
+  pinMode(slider::pins::kTmcEnable, OUTPUT);
+  digitalWrite(slider::pins::kTmcEnable, HIGH);
   delay(200);
   Serial.begin(115200);
   Serial.println("PD-Stepper linear slider starting");
