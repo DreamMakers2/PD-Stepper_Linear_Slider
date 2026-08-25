@@ -3,9 +3,8 @@
 #include "slider_core.h"
 
 using slider::core::EncoderUnwrapper;
+using slider::core::EncoderHardStopMonitor;
 using slider::core::MotionSample;
-using slider::core::RollingMotionMonitor;
-using slider::core::SoftLimitAction;
 using slider::core::SynchronizationAnchor;
 
 void test_physical_unit_conversions() {
@@ -44,75 +43,78 @@ void test_synchronization_anchor_reconstructs_physical_position() {
   TEST_ASSERT_FLOAT_WITHIN(0.001F, 95.0F, anchor.positionForEncoder(1512));
 }
 
-void test_rolling_monitor_trips_on_a_blocked_motor() {
-  RollingMotionMonitor monitor;
+void test_hard_stop_monitor_trips_after_error_persists() {
+  EncoderHardStopMonitor monitor;
   bool tripped = false;
-  for (uint32_t time = 0; time <= 125; time += 5) {
+  for (uint32_t time = 0; time <= 170; time += 5) {
     tripped = monitor.add(MotionSample{time, static_cast<int32_t>(time * 4), 0, 1});
   }
   TEST_ASSERT_TRUE(tripped);
 }
 
-void test_rolling_monitor_does_not_trip_when_encoder_tracks() {
-  RollingMotionMonitor monitor;
-  bool tripped = false;
-  for (uint32_t time = 0; time <= 125; time += 5) {
-    const int32_t commanded = static_cast<int32_t>(time * 4);
-    tripped = monitor.add(MotionSample{time, commanded, commanded - 20, 1});
-  }
-  TEST_ASSERT_FALSE(tripped);
-}
-
-void test_rolling_monitor_does_not_accumulate_across_windows() {
-  RollingMotionMonitor monitor;
+void test_hard_stop_monitor_does_not_trip_when_encoder_tracks() {
+  EncoderHardStopMonitor monitor;
   bool tripped = false;
   for (uint32_t time = 0; time <= 1000; time += 5) {
-    // Only 100 counts of disagreement can exist in any 125 ms window.
-    const int32_t commanded = static_cast<int32_t>(time * 0.8F);
-    tripped = monitor.add(MotionSample{time, commanded, 0, 1});
+    const int32_t commanded = static_cast<int32_t>(time * 4);
+    tripped = monitor.add(MotionSample{time, commanded, commanded - 20, 1});
     TEST_ASSERT_FALSE(tripped);
   }
 }
 
-void test_rolling_monitor_resets_on_reversal() {
-  RollingMotionMonitor monitor;
-  for (uint32_t time = 0; time <= 100; time += 5) {
-    monitor.add(MotionSample{time, static_cast<int32_t>(time * 4), 0, 1});
-  }
-  TEST_ASSERT_FALSE(monitor.add(MotionSample{105, 390, 10, -1}));
-  TEST_ASSERT_EQUAL_UINT32(1, monitor.size());
-}
-
-void test_rolling_monitor_handles_negative_motion() {
-  RollingMotionMonitor monitor;
+void test_hard_stop_monitor_trips_at_low_speed() {
+  EncoderHardStopMonitor monitor;
   bool tripped = false;
-  for (uint32_t time = 0; time <= 125; time += 5) {
-    tripped = monitor.add(
-        MotionSample{time, -static_cast<int32_t>(time * 4), 0, -1});
+  for (uint32_t time = 0; time <= 945; time += 5) {
+    const int32_t commanded = static_cast<int32_t>(time / 5);
+    tripped = monitor.add(MotionSample{time, commanded, 0, 1});
+    if (time < 945) TEST_ASSERT_FALSE(tripped);
   }
   TEST_ASSERT_TRUE(tripped);
 }
 
-void test_velocity_mode_stops_cleanly_at_either_soft_limit() {
-  TEST_ASSERT_EQUAL_UINT8(
-      static_cast<uint8_t>(SoftLimitAction::kStopVelocity),
-      static_cast<uint8_t>(slider::core::evaluateSoftLimit(
-          true, 1, 464.9F, 465.0F, 5.0F, 465.0F)));
-  TEST_ASSERT_EQUAL_UINT8(
-      static_cast<uint8_t>(SoftLimitAction::kStopVelocity),
-      static_cast<uint8_t>(slider::core::evaluateSoftLimit(
-          true, -1, 5.0F, 5.1F, 5.0F, 465.0F)));
+void test_hard_stop_monitor_requires_continuous_persistence() {
+  EncoderHardStopMonitor monitor;
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{0, 0, 0, 1}));
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{5, 164, 0, 1}));
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{100, 170, 10, 1}));
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{200, 334, 170, 1}));
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{320, 340, 170, 1}));
+  TEST_ASSERT_TRUE(monitor.add(MotionSample{325, 345, 170, 1}));
 }
 
-void test_position_overrun_remains_a_travel_limit_fault() {
-  TEST_ASSERT_EQUAL_UINT8(
-      static_cast<uint8_t>(SoftLimitAction::kFault),
-      static_cast<uint8_t>(slider::core::evaluateSoftLimit(
-          false, 1, 465.1F, 465.0F, 5.0F, 465.0F)));
-  TEST_ASSERT_EQUAL_UINT8(
-      static_cast<uint8_t>(SoftLimitAction::kNone),
-      static_cast<uint8_t>(slider::core::evaluateSoftLimit(
-          false, -1, 20.0F, 20.0F, 5.0F, 465.0F)));
+void test_hard_stop_monitor_resets_on_reversal() {
+  EncoderHardStopMonitor monitor;
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{0, 0, 0, 1}));
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{10, 200, 0, 1}));
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{20, 190, 10, -1}));
+  TEST_ASSERT_EQUAL_INT32(0, monitor.trackingErrorCounts());
+}
+
+void test_hard_stop_monitor_handles_negative_motion() {
+  EncoderHardStopMonitor monitor;
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{0, 0, 0, -1}));
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{5, -200, 0, -1}));
+  TEST_ASSERT_TRUE(monitor.add(MotionSample{130, -210, 0, -1}));
+}
+
+void test_soft_limit_equality_is_allowed_but_overrun_faults() {
+  TEST_ASSERT_FALSE(slider::core::positionOutsideSoftLimits(
+      5.0F, 5.0F, 465.0F));
+  TEST_ASSERT_FALSE(slider::core::positionOutsideSoftLimits(
+      465.0F, 5.0F, 465.0F));
+  TEST_ASSERT_TRUE(slider::core::positionOutsideSoftLimits(
+      4.9F, 5.0F, 465.0F));
+  TEST_ASSERT_TRUE(slider::core::positionOutsideSoftLimits(
+      465.1F, 5.0F, 465.0F));
+  TEST_ASSERT_FALSE(slider::core::softLimitExceeded(
+      1, 464.9F, 465.0F, 5.0F, 465.0F));
+  TEST_ASSERT_FALSE(slider::core::softLimitExceeded(
+      -1, 5.0F, 5.1F, 5.0F, 465.0F));
+  TEST_ASSERT_TRUE(slider::core::softLimitExceeded(
+      1, 465.1F, 465.0F, 5.0F, 465.0F));
+  TEST_ASSERT_TRUE(slider::core::softLimitExceeded(
+      -1, 5.0F, 4.9F, 5.0F, 465.0F));
 }
 
 void test_bad_power_good_faults_exactly_when_driver_is_enabled() {
@@ -145,13 +147,13 @@ int main(int, char**) {
   RUN_TEST(test_encoder_unwraps_in_both_directions);
   RUN_TEST(test_travel_is_derived_from_encoder_endpoint_delta);
   RUN_TEST(test_synchronization_anchor_reconstructs_physical_position);
-  RUN_TEST(test_rolling_monitor_trips_on_a_blocked_motor);
-  RUN_TEST(test_rolling_monitor_does_not_trip_when_encoder_tracks);
-  RUN_TEST(test_rolling_monitor_does_not_accumulate_across_windows);
-  RUN_TEST(test_rolling_monitor_resets_on_reversal);
-  RUN_TEST(test_rolling_monitor_handles_negative_motion);
-  RUN_TEST(test_velocity_mode_stops_cleanly_at_either_soft_limit);
-  RUN_TEST(test_position_overrun_remains_a_travel_limit_fault);
+  RUN_TEST(test_hard_stop_monitor_trips_after_error_persists);
+  RUN_TEST(test_hard_stop_monitor_does_not_trip_when_encoder_tracks);
+  RUN_TEST(test_hard_stop_monitor_trips_at_low_speed);
+  RUN_TEST(test_hard_stop_monitor_requires_continuous_persistence);
+  RUN_TEST(test_hard_stop_monitor_resets_on_reversal);
+  RUN_TEST(test_hard_stop_monitor_handles_negative_motion);
+  RUN_TEST(test_soft_limit_equality_is_allowed_but_overrun_faults);
   RUN_TEST(test_bad_power_good_faults_exactly_when_driver_is_enabled);
   RUN_TEST(test_sustained_encoder_loss_faults_when_homed_or_enabled);
   RUN_TEST(test_closed_loop_motion_requires_a_currently_valid_encoder);

@@ -103,7 +103,7 @@ class MotionController {
   TMC2209Stepper tmc_{&Serial2, 0.100F, 0};
 
   core::EncoderUnwrapper encoder_unwrapper_{};
-  core::RollingMotionMonitor motion_monitor_{};
+  core::EncoderHardStopMonitor motion_monitor_{};
   core::SynchronizationAnchor sync_anchor_{};
   bool sync_anchor_valid_ = false;
 

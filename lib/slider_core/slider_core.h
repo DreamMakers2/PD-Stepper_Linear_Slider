@@ -1,7 +1,5 @@
 #pragma once
 
-#include <array>
-#include <cstddef>
 #include <cstdint>
 
 namespace slider::core {
@@ -11,21 +9,16 @@ constexpr int32_t kFullStepsPerRevolution = 200;
 constexpr float kMillimetresPerRevolution = 40.0F;
 constexpr int32_t kHardStopErrorCounts = 164;
 
-enum class SoftLimitAction : uint8_t {
-  kNone,
-  kStopVelocity,
-  kFault,
-};
-
 float encoderCountsToMillimetres(int32_t counts);
 int32_t millimetresToEncoderCounts(float millimetres);
 float microstepsToMillimetres(int32_t microsteps, uint16_t microsteps_per_step);
 int32_t millimetresToMicrosteps(float millimetres, uint16_t microsteps_per_step);
 int32_t microstepsToEncoderCounts(int32_t microsteps, uint16_t microsteps_per_step);
-SoftLimitAction evaluateSoftLimit(bool velocity_mode, int8_t direction,
-                                  float encoder_position_mm,
-                                  float commanded_position_mm, float soft_min_mm,
-                                  float soft_max_mm);
+bool softLimitExceeded(int8_t direction, float encoder_position_mm,
+                       float commanded_position_mm, float soft_min_mm,
+                       float soft_max_mm);
+bool positionOutsideSoftLimits(float position_mm, float soft_min_mm,
+                               float soft_max_mm);
 bool powerGoodInvariantViolated(bool driver_enabled, bool power_good);
 bool encoderLossRequiresFault(bool homed, bool driver_enabled,
                               uint8_t consecutive_failures,
@@ -52,19 +45,22 @@ struct MotionSample {
   int8_t direction = 0;
 };
 
-class RollingMotionMonitor {
+class EncoderHardStopMonitor {
  public:
-  static constexpr uint32_t kWindowMs = 125;
-  static constexpr std::size_t kCapacity = 32;
+  static constexpr uint32_t kPersistenceMs = 125;
 
   void clear();
   bool add(const MotionSample& sample);
-  std::size_t size() const { return size_; }
+  int32_t trackingErrorCounts() const { return tracking_error_counts_; }
 
  private:
-  std::array<MotionSample, kCapacity> samples_{};
-  std::size_t head_ = 0;
-  std::size_t size_ = 0;
+  bool initialized_ = false;
+  int8_t direction_ = 0;
+  int32_t commanded_origin_ = 0;
+  int32_t actual_origin_ = 0;
+  int32_t tracking_error_counts_ = 0;
+  bool violation_active_ = false;
+  uint32_t violation_started_ms_ = 0;
 };
 
 struct SynchronizationAnchor {

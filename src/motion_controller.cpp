@@ -380,7 +380,6 @@ float MotionController::commandedPositionMm() const {
 
 int8_t MotionController::currentMotionDirection() const {
   if (!isMoving()) return 0;
-  if (mode_ == MotionMode::kVelocity) return requested_velocity_mm_s_ > 0 ? 1 : -1;
   const float delta = target_position_mm_ - commandedPositionMm();
   if (delta > 0.001F) return 1;
   if (delta < -0.001F) return -1;
@@ -605,29 +604,28 @@ void MotionController::processMotion(uint32_t now) {
 
   if (mode_ == MotionMode::kMoving) {
     if (!stepper_->isRunning()) {
+      const float final_position = encoderPositionMm();
+      if (core::positionOutsideSoftLimits(final_position, kSoftMarginMm,
+                                          travel_mm_ - kSoftMarginMm)) {
+        enterFault(FaultCode::kTravelLimit, FaultReason::kSoftLimitCrossed);
+        return;
+      }
       requested_velocity_mm_s_ = 0.0F;
-      target_position_mm_ = encoderPositionMm();
+      target_position_mm_ = final_position;
       motion_armed_ = false;
       motion_monitor_.clear();
-      setSynchronizationAnchor(encoderPositionMm());
+      setSynchronizationAnchor(final_position);
       mode_ = MotionMode::kIdle;
       return;
     }
   }
 
-  if (mode_ == MotionMode::kMoving || mode_ == MotionMode::kVelocity) {
+  if (mode_ == MotionMode::kMoving) {
     const int8_t direction = currentMotionDirection();
     const float encoder_position = encoderPositionMm();
     const float step_position = commandedPositionMm();
-    const core::SoftLimitAction action = core::evaluateSoftLimit(
-        mode_ == MotionMode::kVelocity, direction, encoder_position, step_position,
-        kSoftMarginMm, travel_mm_ - kSoftMarginMm);
-    if (action == core::SoftLimitAction::kStopVelocity) {
-      stopMotionAndResynchronize();
-      mode_ = MotionMode::kIdle;
-      return;
-    }
-    if (action == core::SoftLimitAction::kFault) {
+    if (core::softLimitExceeded(direction, encoder_position, step_position,
+                                kSoftMarginMm, travel_mm_ - kSoftMarginMm)) {
       enterFault(FaultCode::kTravelLimit, FaultReason::kSoftLimitCrossed);
     }
   }
@@ -935,25 +933,13 @@ void MotionController::startPositionMove(const Command& command) {
 }
 
 void MotionController::startVelocityMove(const Command& command) {
-  if (!core::closedLoopMotionReady(homed_, encoder_valid_) ||
-      fault_ != FaultCode::kNone || mode_ != MotionMode::kIdle) {
-    return;
-  }
-  setMotionProfile(std::fabs(command.velocity_mm_s), command.acceleration_mm_s2);
-  if (!enableDriver()) return;
-  requested_velocity_mm_s_ = command.velocity_mm_s;
-  target_position_mm_ = command.velocity_mm_s > 0 ? travel_mm_ - kSoftMarginMm
-                                                  : kSoftMarginMm;
-  setSynchronizationAnchor(encoderPositionMm());
-  motion_monitor_.clear();
-  mode_ = MotionMode::kVelocity;
-  motion_started_ms_ = millis();
-  motion_started_step_ = stepper_->getCurrentPosition();
-  motion_armed_ = false;
-  diag_requires_clear_ = false;
-  diag_arm_after_ms_ = millis() + 25;
-  if (command.velocity_mm_s > 0) stepper_->runForward();
-  else stepper_->runBackward();
+  Command finite_move = command;
+  finite_move.type = CommandType::kMove;
+  finite_move.position_mm = command.velocity_mm_s > 0
+                                ? travel_mm_ - kSoftMarginMm
+                                : kSoftMarginMm;
+  finite_move.speed_mm_s = std::fabs(command.velocity_mm_s);
+  startPositionMove(finite_move);
 }
 
 void MotionController::setMotionProfile(float speed_mm_s, float acceleration_mm_s2) {
@@ -1041,7 +1027,7 @@ bool MotionController::submitCommand(const Command& command, const char*& error_
     return false;
   }
   if (command.type == CommandType::kHome &&
-      (published.mode == MotionMode::kMoving || published.mode == MotionMode::kVelocity ||
+      (published.mode == MotionMode::kMoving ||
        published.mode == MotionMode::kHomingMin || published.mode == MotionMode::kBackoffMin ||
        published.mode == MotionMode::kHomingMax || published.mode == MotionMode::kBackoffMax)) {
     portEXIT_CRITICAL(&data_mux_);
@@ -1161,7 +1147,7 @@ bool MotionController::isHoming() const {
 }
 
 bool MotionController::isNormalMotion() const {
-  return mode_ == MotionMode::kMoving || mode_ == MotionMode::kVelocity;
+  return mode_ == MotionMode::kMoving;
 }
 
 bool MotionController::isMoving() const {

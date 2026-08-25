@@ -34,17 +34,17 @@ int32_t microstepsToEncoderCounts(int32_t microsteps, uint16_t microsteps_per_st
       static_cast<double>(kFullStepsPerRevolution * microsteps_per_step)));
 }
 
-SoftLimitAction evaluateSoftLimit(bool velocity_mode, int8_t direction,
-                                  float encoder_position_mm,
-                                  float commanded_position_mm, float soft_min_mm,
-                                  float soft_max_mm) {
-  const bool reached =
-      (direction < 0 &&
-       (encoder_position_mm <= soft_min_mm || commanded_position_mm <= soft_min_mm)) ||
-      (direction > 0 &&
-       (encoder_position_mm >= soft_max_mm || commanded_position_mm >= soft_max_mm));
-  if (!reached) return SoftLimitAction::kNone;
-  return velocity_mode ? SoftLimitAction::kStopVelocity : SoftLimitAction::kFault;
+bool softLimitExceeded(int8_t direction, float encoder_position_mm,
+                       float commanded_position_mm, float soft_min_mm,
+                       float soft_max_mm) {
+  return positionOutsideSoftLimits(encoder_position_mm, soft_min_mm, soft_max_mm) ||
+         (direction < 0 && commanded_position_mm < soft_min_mm) ||
+         (direction > 0 && commanded_position_mm > soft_max_mm);
+}
+
+bool positionOutsideSoftLimits(float position_mm, float soft_min_mm,
+                               float soft_max_mm) {
+  return position_mm < soft_min_mm || position_mm > soft_max_mm;
 }
 
 bool powerGoodInvariantViolated(bool driver_enabled, bool power_good) {
@@ -85,51 +85,47 @@ int32_t EncoderUnwrapper::update(uint16_t raw_count) {
   return unwrapped_counts_;
 }
 
-void RollingMotionMonitor::clear() {
-  head_ = 0;
-  size_ = 0;
+void EncoderHardStopMonitor::clear() {
+  initialized_ = false;
+  direction_ = 0;
+  commanded_origin_ = 0;
+  actual_origin_ = 0;
+  tracking_error_counts_ = 0;
+  violation_active_ = false;
+  violation_started_ms_ = 0;
 }
 
-bool RollingMotionMonitor::add(const MotionSample& sample) {
+bool EncoderHardStopMonitor::add(const MotionSample& sample) {
   if (sample.direction == 0) {
     clear();
     return false;
   }
 
-  if (size_ > 0) {
-    const std::size_t newest = (head_ + size_ - 1) % kCapacity;
-    if (samples_[newest].direction != sample.direction) clear();
+  if (!initialized_ || direction_ != sample.direction) {
+    initialized_ = true;
+    direction_ = sample.direction;
+    commanded_origin_ = sample.commanded_encoder_counts;
+    actual_origin_ = sample.actual_encoder_counts;
+    tracking_error_counts_ = 0;
+    violation_active_ = false;
+    return false;
   }
 
-  if (size_ == kCapacity) {
-    head_ = (head_ + 1) % kCapacity;
-    --size_;
-  }
-  samples_[(head_ + size_) % kCapacity] = sample;
-  ++size_;
-
-  while (size_ > 1) {
-    const MotionSample& oldest = samples_[head_];
-    if (sample.time_ms - oldest.time_ms <= kWindowMs) break;
-    const std::size_t next = (head_ + 1) % kCapacity;
-    if (sample.time_ms - samples_[next].time_ms < kWindowMs) break;
-    head_ = next;
-    --size_;
-  }
-
-  if (size_ < 2) return false;
-  const MotionSample& oldest = samples_[head_];
-  const uint32_t elapsed = sample.time_ms - oldest.time_ms;
-  if (elapsed < kWindowMs - 5 || elapsed > kWindowMs + 10) return false;
-
-  const int32_t direction = sample.direction;
   const int32_t commanded =
-      (sample.commanded_encoder_counts - oldest.commanded_encoder_counts) * direction;
-  const int32_t actual =
-      (sample.actual_encoder_counts - oldest.actual_encoder_counts) * direction;
-  if (commanded < kHardStopErrorCounts) return false;
+      (sample.commanded_encoder_counts - commanded_origin_) * direction_;
+  const int32_t actual = (sample.actual_encoder_counts - actual_origin_) * direction_;
+  tracking_error_counts_ = commanded - actual;
 
-  return commanded - actual >= kHardStopErrorCounts;
+  if (tracking_error_counts_ < kHardStopErrorCounts) {
+    violation_active_ = false;
+    return false;
+  }
+  if (!violation_active_) {
+    violation_active_ = true;
+    violation_started_ms_ = sample.time_ms;
+    return false;
+  }
+  return sample.time_ms - violation_started_ms_ >= kPersistenceMs;
 }
 
 float SynchronizationAnchor::positionForEncoder(int32_t current_encoder_counts) const {

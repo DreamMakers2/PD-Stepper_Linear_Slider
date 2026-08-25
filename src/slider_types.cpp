@@ -9,7 +9,6 @@ const char* motionModeName(MotionMode value) {
     case MotionMode::kDisabled: return "DISABLED";
     case MotionMode::kIdle: return "IDLE";
     case MotionMode::kMoving: return "MOVING";
-    case MotionMode::kVelocity: return "VELOCITY";
     case MotionMode::kHomingMin: return "HOMING_MIN";
     case MotionMode::kBackoffMin: return "BACKOFF_MIN";
     case MotionMode::kHomingMax: return "HOMING_MAX";

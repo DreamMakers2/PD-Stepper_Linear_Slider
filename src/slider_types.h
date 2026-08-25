@@ -8,7 +8,6 @@ enum class MotionMode : uint8_t {
   kDisabled,
   kIdle,
   kMoving,
-  kVelocity,
   kHomingMin,
   kBackoffMin,
   kHomingMax,
