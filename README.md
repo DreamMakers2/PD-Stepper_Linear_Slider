@@ -22,7 +22,7 @@ The project pins the ESP32 Arduino toolchain and motion/driver/network dependenc
 - PG is sampled directly before and after every EN activation. An enabled driver can never coexist with bad PG in the controller state; a missed edge is caught by the main-loop invariant and latches `POWER_LOSS`.
 - Encoder hard-stop protection compares commanded travel with encoder travel from the start of the current move. A tracking error of at least 164 AS5600 counts must remain present for 125 ms before it trips, so obstruction detection still works at low speed without reacting to brief belt or shaft transients.
 - Five consecutive AS5600 sample failures (about 25 ms) latch `ENCODER_FAULT` whenever the controller is homed or the driver is enabled. New move and velocity commands are rejected while the latest encoder sample is invalid.
-- The TMC2209 UART and driver status are checked at startup and before configuration or enable transitions. A failed check latches `TMC_COMM`; serious driver status flags latch `TMC_DRIVER`. No UART polling is performed during motion.
+- The TMC2209 UART and driver status are checked at startup and before configuration or enable transitions. A CRC error or invalid all-ones status latches `TMC_COMM`; serious driver status flags latch `TMC_DRIVER`. No UART polling is performed during motion.
 - Faults are latched. Fault reset leaves the motor disabled and unhomed; a new controlled home is also allowed for recoverable obstruction/homing faults.
 
 Do initial testing with the belt disconnected or the carriage able to move harmlessly. Never connect or disconnect the motor while powered. Confirm motor direction, encoder response, DIAG, and EN behavior before the first coupled homing run.

@@ -316,7 +316,7 @@ void MotionController::updateSlowTelemetry(uint32_t now) {
 
 bool MotionController::checkTmc() {
   const uint32_t status = tmc_.DRV_STATUS();
-  const bool status_ok = !tmc_.CRCerror;
+  const bool status_ok = !tmc_.CRCerror && status != 0xFFFFFFFFU;
   tmc_uart_ok_ = status_ok;
   if (!tmc_uart_ok_) {
     enterFault(FaultCode::kTmcComm, FaultReason::kReadFailed);
