@@ -412,6 +412,7 @@ void MotionController::processEmergencyEvents() {
     // stopped by the ISR. This is the reference used to repair FAS's position.
     captureEncoderAfterStop();
     driver_enabled_ = false;
+    delay(25);
     resynchronizeStepperFromEncoder(0.0F, false);
     if (!encoder_valid_) enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
     else if (isHoming()) {
