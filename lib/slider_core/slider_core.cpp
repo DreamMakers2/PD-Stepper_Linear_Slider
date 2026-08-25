@@ -3,6 +3,11 @@
 #include <cmath>
 
 namespace slider::core {
+namespace {
+
+constexpr float kSoftLimitToleranceMm = 0.2F;
+
+}  // namespace
 
 float encoderCountsToMillimetres(int32_t counts) {
   return static_cast<float>(counts) * kMillimetresPerRevolution /
@@ -38,13 +43,14 @@ bool softLimitExceeded(int8_t direction, float encoder_position_mm,
                        float commanded_position_mm, float soft_min_mm,
                        float soft_max_mm) {
   return positionOutsideSoftLimits(encoder_position_mm, soft_min_mm, soft_max_mm) ||
-         (direction < 0 && commanded_position_mm < soft_min_mm) ||
-         (direction > 0 && commanded_position_mm > soft_max_mm);
+         (direction < 0 && commanded_position_mm < soft_min_mm - kSoftLimitToleranceMm) ||
+         (direction > 0 && commanded_position_mm > soft_max_mm + kSoftLimitToleranceMm);
 }
 
 bool positionOutsideSoftLimits(float position_mm, float soft_min_mm,
                                float soft_max_mm) {
-  return position_mm < soft_min_mm || position_mm > soft_max_mm;
+  return position_mm < soft_min_mm - kSoftLimitToleranceMm ||
+         position_mm > soft_max_mm + kSoftLimitToleranceMm;
 }
 
 bool powerGoodInvariantViolated(bool driver_enabled, bool power_good) {

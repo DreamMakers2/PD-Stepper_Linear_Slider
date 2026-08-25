@@ -15,7 +15,7 @@ int controllerErrorStatus(const char* code) {
       strcmp(code, "STATE_CONFLICT") == 0 ||
       strcmp(code, "OUTSIDE_SOFT_LIMITS") == 0 ||
       strcmp(code, "FAULT_RESET_REQUIRED") == 0 ||
-      strcmp(code, "POWER_NOT_GOOD") == 0 || strcmp(code, "TMC_NOT_READY") == 0 ||
+      strcmp(code, "POWER_NOT_GOOD") == 0 ||
       strcmp(code, "ENCODER_NOT_READY") == 0 ||
       strcmp(code, "NO_ACTIVE_FAULT") == 0) {
     return 409;
@@ -100,12 +100,13 @@ void ApiServer::handleState(AsyncWebServerRequest* request) {
   driver["open_load_b"] = (state.tmc_status_raw & 0x80U) != 0;
   JsonObject uart = driver["uart"].to<JsonObject>();
   uart["ok"] = state.tmc_uart_ok;
-  uart["ifcnt"] = state.tmc_ifcnt;
-  uart["version"] = state.tmc_version;
-  uart["ioin_raw"] = state.tmc_ioin_raw;
-  uart["consecutive_failures"] = state.tmc_consecutive_failures;
-  uart["last_ok_ms"] = state.tmc_last_ok_ms;
-  uart["last_failure_reason"] = faultReasonName(state.tmc_last_failure_reason);
+  // Keep the response shape without retaining detailed UART history.
+  uart["ifcnt"] = 0;
+  uart["version"] = 0;
+  uart["ioin_raw"] = 0;
+  uart["consecutive_failures"] = state.tmc_uart_ok ? 0 : 1;
+  uart["last_ok_ms"] = 0;
+  uart["last_failure_reason"] = state.tmc_uart_ok ? "NONE" : "READ_FAILED";
 
   AsyncResponseStream* response = request->beginResponseStream("application/json");
   serializeJson(document, *response);

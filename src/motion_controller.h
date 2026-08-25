@@ -33,8 +33,6 @@ class MotionController {
   static constexpr uint32_t kEncoderSampleMs = 5;
   static constexpr uint8_t kEncoderFailureThreshold = 5;
   static constexpr uint32_t kTelemetrySampleMs = 500;
-  static constexpr uint32_t kTmcProbeMs = 500;
-  static constexpr uint8_t kExpectedTmcVersion = 0x21;
   static constexpr float kVbusDividerRatio = 0.1189427313F;
 
   static void IRAM_ATTR diagIsr(void* argument);
@@ -57,7 +55,7 @@ class MotionController {
   bool samplePowerGood();
   void updateFastTelemetry(uint32_t now);
   void updateSlowTelemetry(uint32_t now);
-  void probeTmc(uint32_t now);
+  bool checkTmc();
   float encoderPositionMm() const;
   float commandedPositionMm() const;
   int8_t currentMotionDirection() const;
@@ -141,12 +139,6 @@ class MotionController {
   uint16_t stallguard_result_ = 0;
   uint32_t tmc_status_raw_ = 0;
   bool tmc_uart_ok_ = false;
-  uint8_t tmc_ifcnt_ = 0;
-  uint8_t tmc_version_ = 0;
-  uint32_t tmc_ioin_raw_ = 0;
-  uint8_t tmc_probe_failures_ = 0;
-  uint32_t tmc_last_ok_ms_ = 0;
-  FaultReason last_tmc_comm_reason_ = FaultReason::kNone;
 
   uint16_t active_microsteps_ = 4;
   uint32_t motion_started_ms_ = 0;
@@ -155,7 +147,6 @@ class MotionController {
   uint32_t last_encoder_sample_ms_ = 0;
   uint32_t last_motion_monitor_ms_ = 0;
   uint32_t last_telemetry_sample_ms_ = 0;
-  uint32_t last_tmc_probe_ms_ = 0;
   uint8_t encoder_read_failures_ = 0;
 };
 

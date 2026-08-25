@@ -35,8 +35,6 @@ enum class FaultReason : uint8_t {
   kInvalidDiag,
   kTravelTooShort,
   kReadFailed,
-  kVersionMismatch,
-  kIfcntFailed,
   kOverTemperature,
   kShortCircuit,
   kPowerGoodLost,
@@ -108,12 +106,6 @@ struct StateSnapshot {
   uint16_t stallguard_result = 0;
 
   bool tmc_uart_ok = false;
-  uint8_t tmc_ifcnt = 0;
-  uint8_t tmc_version = 0;
-  uint32_t tmc_ioin_raw = 0;
-  uint8_t tmc_consecutive_failures = 0;
-  uint32_t tmc_last_ok_ms = 0;
-  FaultReason tmc_last_failure_reason = FaultReason::kNone;
   uint32_t tmc_status_raw = 0;
 };
 

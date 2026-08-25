@@ -42,8 +42,6 @@ const char* faultReasonName(FaultReason value) {
     case FaultReason::kInvalidDiag: return "INVALID_DIAG";
     case FaultReason::kTravelTooShort: return "TRAVEL_TOO_SHORT";
     case FaultReason::kReadFailed: return "READ_FAILED";
-    case FaultReason::kVersionMismatch: return "VERSION_MISMATCH";
-    case FaultReason::kIfcntFailed: return "IFCNT_FAILED";
     case FaultReason::kOverTemperature: return "OVER_TEMPERATURE";
     case FaultReason::kShortCircuit: return "SHORT_CIRCUIT";
     case FaultReason::kPowerGoodLost: return "POWER_GOOD_LOST";

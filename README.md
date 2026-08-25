@@ -17,12 +17,12 @@ The project pins the ESP32 Arduino toolchain and motion/driver/network dependenc
 
 - Every boot starts disabled and unhomed. Position and velocity commands are rejected until homing succeeds.
 - Homing uses the fixed known-good profile from the concept document and independently limits each seek to 500 mm and 15 seconds.
-- Detected physical endpoints are measured from the unwrapped AS5600 values. The normal commandable range keeps 5 mm away from each physical endpoint.
+- Detected physical endpoints are measured from the unwrapped AS5600 values. The normal commandable range keeps 5 mm away from each physical endpoint, with 0.2 mm of fault-check tolerance for encoder and microstep rounding.
 - DIAG and power-good loss immediately disable EN and force-stop FastAccelStepper. The queued step position is then replaced with an encoder-derived position.
 - PG is sampled directly before and after every EN activation. An enabled driver can never coexist with bad PG in the controller state; a missed edge is caught by the main-loop invariant and latches `POWER_LOSS`.
 - Encoder hard-stop protection compares commanded travel with encoder travel from the start of the current move. A tracking error of at least 164 AS5600 counts must remain present for 125 ms before it trips, so obstruction detection still works at low speed without reacting to brief belt or shaft transients.
 - Five consecutive AS5600 sample failures (about 25 ms) latch `ENCODER_FAULT` whenever the controller is homed or the driver is enabled. New move and velocity commands are rejected while the latest encoder sample is invalid.
-- The TMC2209 UART is checked at startup and every 500 ms using CRC-checked register reads, chip version, a readable driver status, and IFCNT write acknowledgement. Two consecutive failures latch `TMC_COMM`.
+- The TMC2209 UART and driver status are checked at startup and before configuration or enable transitions. A failed check latches `TMC_COMM`; serious driver status flags latch `TMC_DRIVER`. No UART polling is performed during motion.
 - Faults are latched. Fault reset leaves the motor disabled and unhomed; a new controlled home is also allowed for recoverable obstruction/homing faults.
 
 Do initial testing with the belt disconnected or the carriage able to move harmlessly. Never connect or disconnect the motor while powered. Confirm motor direction, encoder response, DIAG, and EN behavior before the first coupled homing run.
@@ -37,7 +37,7 @@ All responses are JSON. Reads return HTTP 200; accepted actions/configuration re
 curl http://CONTROLLER_IP/api/state
 ```
 
-The result includes mode, homing state, encoder and commanded position, calibrated physical and soft limits, active fault/reason, power-good, VBUS, AS5600 counts, DIAG, StallGuard, decoded/raw TMC status, and UART health.
+The result includes mode, homing state, encoder and commanded position, calibrated physical and soft limits, active fault/reason, power-good, VBUS, AS5600 counts, DIAG, and the TMC status from the most recent readiness check. Existing detailed UART keys remain in the response but are not continuously tracked.
 
 ### Home and move
 
@@ -97,11 +97,11 @@ The API accepts 100–2000 mA because that is the driver-level range used for va
 3. Turn the motor slowly by hand while disabled and confirm unwrapped encoder counts change continuously through wraparound. Use `invert_encoder` if pre-calibration movement comparison runs opposite to commanded steps.
 4. Verify DIAG disables EN at the first stop and that state reports an endpoint transition or latched unexpected-stall fault.
 5. Couple the belt with clear access to power removal. Home once while watching the carriage and serial/state output. Confirm measured travel is close to the expected 470 mm and soft limits are 5 mm inside both stops.
-6. Test `stop`, PG power removal, TMC UART disconnection, and encoder obstruction at low mechanical risk before unattended use.
+6. Test `stop`, PG power removal, TMC UART disconnection during an enable attempt, and encoder obstruction at low mechanical risk before unattended use.
 
 ## Development checks
 
-Run the host-side conversion, encoder unwrap, synchronization, and rolling-window tests with:
+Run the host-side conversion, encoder unwrap, synchronization, hard-stop, and soft-limit tests with:
 
 ```sh
 pio test -e native

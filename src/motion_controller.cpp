@@ -61,17 +61,17 @@ bool MotionController::begin() {
 
   initializeTmc();
   delay(10);
-  probeTmc(millis());
+  const bool tmc_ready = checkTmc();
 
   attachInterruptArg(digitalPinToInterrupt(pins::kDiag), diagIsr, this, RISING);
   attachInterruptArg(digitalPinToInterrupt(pins::kPowerGood), powerGoodIsr, this, RISING);
 
   samplePowerGood();
-  mode_ = MotionMode::kDisabled;
+  if (tmc_ready) mode_ = MotionMode::kDisabled;
   updateFastTelemetry(millis());
   updateSlowTelemetry(millis());
   updateSnapshot();
-  return true;
+  return tmc_ready;
 }
 
 void MotionController::initializePins() {
@@ -247,7 +247,6 @@ void MotionController::tick() {
     enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
   }
 
-  if (now - last_tmc_probe_ms_ >= kTmcProbeMs) probeTmc(now);
   if (now - last_telemetry_sample_ms_ >= kTelemetrySampleMs) updateSlowTelemetry(now);
 
   processRollingHardStop(now);
@@ -315,51 +314,25 @@ void MotionController::updateSlowTelemetry(uint32_t now) {
   vbus_voltage_ = (static_cast<float>(millivolts) / kSamples / 1000.0F) / kVbusDividerRatio;
 }
 
-void MotionController::probeTmc(uint32_t now) {
-  last_tmc_probe_ms_ = now;
-  const uint8_t before = tmc_.IFCNT();
-  const bool before_ok = !tmc_.CRCerror;
-  const uint32_t ioin = tmc_.IOIN();
-  const bool ioin_ok = !tmc_.CRCerror;
-  const uint8_t version = static_cast<uint8_t>(ioin >> 24);
-  tmc_.SGTHRS(isHoming() ? 20 : config_.stallguard_threshold);
-  const uint8_t after = tmc_.IFCNT();
-  const bool after_ok = !tmc_.CRCerror;
+bool MotionController::checkTmc() {
   const uint32_t status = tmc_.DRV_STATUS();
-  const bool status_ok = !tmc_.CRCerror && status != 0xFFFFFFFFU;
-  const uint16_t stallguard = tmc_.SG_RESULT();
-  const bool stallguard_ok = !tmc_.CRCerror;
+  const bool status_ok = !tmc_.CRCerror;
+  tmc_uart_ok_ = status_ok;
+  if (!tmc_uart_ok_) {
+    enterFault(FaultCode::kTmcComm, FaultReason::kReadFailed);
+    return false;
+  }
 
-  const bool version_ok = version == kExpectedTmcVersion;
-  const bool ifcnt_ok = after == static_cast<uint8_t>(before + 1);
-  const bool reads_ok = before_ok && ioin_ok && after_ok && status_ok && stallguard_ok;
-  tmc_version_ = version;
-  tmc_ifcnt_ = after;
-  tmc_ioin_raw_ = ioin;
   tmc_status_raw_ = status;
-  stallguard_result_ = stallguard;
-
-  if (reads_ok && version_ok && ifcnt_ok) {
-    tmc_uart_ok_ = true;
-    tmc_probe_failures_ = 0;
-    tmc_last_ok_ms_ = now;
-    if (driver_enabled_ && (tmc_status_raw_ & kTmcSeriousFaultMask) != 0) {
-      enterFault(FaultCode::kTmcDriver,
-                 (tmc_status_raw_ & 0x02U) != 0
-                     ? FaultReason::kOverTemperature
-                     : FaultReason::kShortCircuit);
-    }
-    return;
+  const uint16_t stallguard = tmc_.SG_RESULT();
+  if (!tmc_.CRCerror) stallguard_result_ = stallguard;
+  if ((status & kTmcSeriousFaultMask) != 0) {
+    enterFault(FaultCode::kTmcDriver,
+               (status & 0x02U) != 0 ? FaultReason::kOverTemperature
+                                     : FaultReason::kShortCircuit);
+    return false;
   }
-
-  tmc_uart_ok_ = false;
-  if (!reads_ok) last_tmc_comm_reason_ = FaultReason::kReadFailed;
-  else if (!version_ok) last_tmc_comm_reason_ = FaultReason::kVersionMismatch;
-  else last_tmc_comm_reason_ = FaultReason::kIfcntFailed;
-  if (tmc_probe_failures_ < UINT8_MAX) ++tmc_probe_failures_;
-  if (tmc_probe_failures_ >= 2 && fault_ == FaultCode::kNone) {
-    enterFault(FaultCode::kTmcComm, last_tmc_comm_reason_);
-  }
+  return true;
 }
 
 float MotionController::encoderPositionMm() const {
@@ -516,17 +489,9 @@ void MotionController::processPendingRequest() {
     setDirectionPolarity();
     active_microsteps_ = config_.microsteps;
     applyTmcConfig(config_);
-    probeTmc(millis());
-    if (fault_ != FaultCode::kNone) return;
-    if ((tmc_status_raw_ & kTmcSeriousFaultMask) != 0) {
-      enterFault(FaultCode::kTmcDriver,
-                 (tmc_status_raw_ & 0x02U) != 0
-                     ? FaultReason::kOverTemperature
-                     : FaultReason::kShortCircuit);
-      return;
-    }
+    if (!checkTmc()) return;
     samplePowerGood();
-    if (was_enabled && !invalidates_home && tmc_uart_ok_ && !enableDriver()) {
+    if (was_enabled && !invalidates_home && !enableDriver()) {
       return;
     }
     mode_ = driver_enabled_ ? MotionMode::kIdle : MotionMode::kDisabled;
@@ -545,17 +510,7 @@ void MotionController::processPendingRequest() {
           handlePowerLoss();
           break;
         }
-        probeTmc(millis());
-      }
-      if ((mode_ == MotionMode::kDisabled || mode_ == MotionMode::kIdle) &&
-          tmc_uart_ok_ && fault_ == FaultCode::kNone &&
-          (tmc_status_raw_ & kTmcSeriousFaultMask) == 0) {
         if (enableDriver()) mode_ = MotionMode::kIdle;
-      } else if (tmc_uart_ok_ && (tmc_status_raw_ & kTmcSeriousFaultMask) != 0) {
-        enterFault(FaultCode::kTmcDriver,
-                   (tmc_status_raw_ & 0x02U) != 0
-                       ? FaultReason::kOverTemperature
-                       : FaultReason::kShortCircuit);
       }
       break;
     case CommandType::kResetFault:
@@ -653,7 +608,7 @@ void MotionController::processRollingHardStop(uint32_t now) {
 }
 
 bool MotionController::enableDriver() {
-  if (stepper_ == nullptr || !tmc_uart_ok_) return false;
+  if (stepper_ == nullptr || !checkTmc()) return false;
 
   // PG may change after an earlier state snapshot. Check it directly before EN,
   // immediately after EN, and once more after publishing the enabled state.
@@ -734,21 +689,7 @@ void MotionController::enterFault(FaultCode code, FaultReason reason) {
 void MotionController::clearFault() {
   stopMotionAndResynchronize();
   disableDriver(true);
-  probeTmc(millis());
-  if (!tmc_uart_ok_) {
-    fault_ = FaultCode::kTmcComm;
-    fault_reason_ = last_tmc_comm_reason_;
-    mode_ = MotionMode::kFaulted;
-    return;
-  }
-  if ((tmc_status_raw_ & kTmcSeriousFaultMask) != 0) {
-    fault_ = FaultCode::kTmcDriver;
-    fault_reason_ = (tmc_status_raw_ & 0x02U) != 0
-                        ? FaultReason::kOverTemperature
-                        : FaultReason::kShortCircuit;
-    mode_ = MotionMode::kFaulted;
-    return;
-  }
+  if (!checkTmc()) return;
   fault_ = FaultCode::kNone;
   fault_reason_ = FaultReason::kNone;
   mode_ = MotionMode::kDisabled;
@@ -761,11 +702,6 @@ bool MotionController::startHome() {
     enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
     return false;
   }
-  if (!tmc_uart_ok_) {
-    enterFault(FaultCode::kTmcComm, last_tmc_comm_reason_);
-    return false;
-  }
-
   stopMotionAndResynchronize();
   disableDriver(true);
   fault_ = FaultCode::kNone;
@@ -775,19 +711,6 @@ bool MotionController::startHome() {
   samplePowerGood();
   if (!power_good_) {
     enterFault(FaultCode::kPowerLoss, FaultReason::kPowerGoodLost);
-    return false;
-  }
-
-  probeTmc(millis());
-  if (!tmc_uart_ok_) {
-    enterFault(FaultCode::kTmcComm, last_tmc_comm_reason_);
-    return false;
-  }
-  if ((tmc_status_raw_ & kTmcSeriousFaultMask) != 0) {
-    enterFault(FaultCode::kTmcDriver,
-               (tmc_status_raw_ & 0x02U) != 0
-                   ? FaultReason::kOverTemperature
-                   : FaultReason::kShortCircuit);
     return false;
   }
 
@@ -885,18 +808,6 @@ void MotionController::finishHoming() {
   samplePowerGood();
   if (!power_good_) {
     enterFault(FaultCode::kPowerLoss, FaultReason::kPowerGoodLost);
-    return;
-  }
-  probeTmc(millis());
-  if (!tmc_uart_ok_) {
-    enterFault(FaultCode::kTmcComm, last_tmc_comm_reason_);
-    return;
-  }
-  if ((tmc_status_raw_ & kTmcSeriousFaultMask) != 0) {
-    enterFault(FaultCode::kTmcDriver,
-               (tmc_status_raw_ & 0x02U) != 0
-                   ? FaultReason::kOverTemperature
-                   : FaultReason::kShortCircuit);
     return;
   }
   stepper_->forceStopAndNewPosition(
@@ -1051,9 +962,9 @@ bool MotionController::submitCommand(const Command& command, const char*& error_
     return false;
   }
   if (command.type == CommandType::kEnable &&
-      (!published.power_good || !published.tmc_uart_ok)) {
+      !published.power_good) {
     portEXIT_CRITICAL(&data_mux_);
-    error_code = !published.power_good ? "POWER_NOT_GOOD" : "TMC_NOT_READY";
+    error_code = "POWER_NOT_GOOD";
     return false;
   }
   if (command.type == CommandType::kResetFault &&
@@ -1129,12 +1040,6 @@ void MotionController::updateSnapshot() {
   next.diag = diag_state_;
   next.stallguard_result = stallguard_result_;
   next.tmc_uart_ok = tmc_uart_ok_;
-  next.tmc_ifcnt = tmc_ifcnt_;
-  next.tmc_version = tmc_version_;
-  next.tmc_ioin_raw = tmc_ioin_raw_;
-  next.tmc_consecutive_failures = tmc_probe_failures_;
-  next.tmc_last_ok_ms = tmc_last_ok_ms_;
-  next.tmc_last_failure_reason = last_tmc_comm_reason_;
   next.tmc_status_raw = tmc_status_raw_;
   portENTER_CRITICAL(&data_mux_);
   state_ = next;

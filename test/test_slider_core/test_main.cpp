@@ -98,23 +98,29 @@ void test_hard_stop_monitor_handles_negative_motion() {
   TEST_ASSERT_TRUE(monitor.add(MotionSample{130, -210, 0, -1}));
 }
 
-void test_soft_limit_equality_is_allowed_but_overrun_faults() {
+void test_soft_limit_tolerance_allows_endpoint_rounding_but_overrun_faults() {
   TEST_ASSERT_FALSE(slider::core::positionOutsideSoftLimits(
       5.0F, 5.0F, 465.0F));
   TEST_ASSERT_FALSE(slider::core::positionOutsideSoftLimits(
-      465.0F, 5.0F, 465.0F));
+      465.19F, 5.0F, 465.0F));
+  TEST_ASSERT_FALSE(slider::core::positionOutsideSoftLimits(
+      4.81F, 5.0F, 465.0F));
   TEST_ASSERT_TRUE(slider::core::positionOutsideSoftLimits(
-      4.9F, 5.0F, 465.0F));
+      4.79F, 5.0F, 465.0F));
   TEST_ASSERT_TRUE(slider::core::positionOutsideSoftLimits(
-      465.1F, 5.0F, 465.0F));
+      465.21F, 5.0F, 465.0F));
   TEST_ASSERT_FALSE(slider::core::softLimitExceeded(
       1, 464.9F, 465.0F, 5.0F, 465.0F));
   TEST_ASSERT_FALSE(slider::core::softLimitExceeded(
       -1, 5.0F, 5.1F, 5.0F, 465.0F));
+  TEST_ASSERT_FALSE(slider::core::softLimitExceeded(
+      1, 465.0F, 465.19F, 5.0F, 465.0F));
+  TEST_ASSERT_FALSE(slider::core::softLimitExceeded(
+      -1, 5.0F, 4.81F, 5.0F, 465.0F));
   TEST_ASSERT_TRUE(slider::core::softLimitExceeded(
-      1, 465.1F, 465.0F, 5.0F, 465.0F));
+      1, 465.21F, 465.0F, 5.0F, 465.0F));
   TEST_ASSERT_TRUE(slider::core::softLimitExceeded(
-      -1, 5.0F, 4.9F, 5.0F, 465.0F));
+      -1, 5.0F, 4.79F, 5.0F, 465.0F));
 }
 
 void test_bad_power_good_faults_exactly_when_driver_is_enabled() {
@@ -153,7 +159,7 @@ int main(int, char**) {
   RUN_TEST(test_hard_stop_monitor_requires_continuous_persistence);
   RUN_TEST(test_hard_stop_monitor_resets_on_reversal);
   RUN_TEST(test_hard_stop_monitor_handles_negative_motion);
-  RUN_TEST(test_soft_limit_equality_is_allowed_but_overrun_faults);
+  RUN_TEST(test_soft_limit_tolerance_allows_endpoint_rounding_but_overrun_faults);
   RUN_TEST(test_bad_power_good_faults_exactly_when_driver_is_enabled);
   RUN_TEST(test_sustained_encoder_loss_faults_when_homed_or_enabled);
   RUN_TEST(test_closed_loop_motion_requires_a_currently_valid_encoder);
