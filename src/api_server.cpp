@@ -185,7 +185,7 @@ void ApiServer::handleCommand(AsyncWebServerRequest* request, JsonVariant& json)
     return;
   }
   JsonObject body = json.as<JsonObject>();
-  const char* action = body["action"] | nullptr;
+  const char* action = body["action"].as<const char*>();
   if (action == nullptr) {
     sendError(request, 400, "MISSING_ACTION", "Field 'action' is required");
     return;
