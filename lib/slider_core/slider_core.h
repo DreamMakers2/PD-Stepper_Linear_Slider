@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 
 namespace slider::core {
@@ -51,20 +53,17 @@ struct MotionSample {
 
 class EncoderHardStopMonitor {
  public:
-  static constexpr uint32_t kPersistenceMs = 125;
+  static constexpr uint32_t kWindowMs = 125;
+  static constexpr std::size_t kCapacity = 32;
 
   void clear();
   bool add(const MotionSample& sample);
-  int32_t trackingErrorCounts() const { return tracking_error_counts_; }
+  std::size_t size() const { return size_; }
 
  private:
-  bool initialized_ = false;
-  int8_t direction_ = 0;
-  int32_t commanded_origin_ = 0;
-  int32_t actual_origin_ = 0;
-  int32_t tracking_error_counts_ = 0;
-  bool violation_active_ = false;
-  uint32_t violation_started_ms_ = 0;
+  std::array<MotionSample, kCapacity> samples_{};
+  std::size_t head_ = 0;
+  std::size_t size_ = 0;
 };
 
 struct SynchronizationAnchor {

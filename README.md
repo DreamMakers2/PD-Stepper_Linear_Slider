@@ -16,11 +16,12 @@ The project pins the ESP32 Arduino toolchain and motion/driver/network dependenc
 ## Safety model
 
 - Every boot drives TMC `ENN` high before the startup delay and starts disabled and unhomed. Position and velocity commands are rejected until homing succeeds.
-- Homing uses the fixed known-good profile from the concept document and independently limits each seek to 500 mm and 15 seconds.
+- Homing uses the fixed profile from the concept document and independently limits each seek to 500 mm and 15 seconds.
+- Before the first homing move, StealthChop is powered at the full 800 mA run-current scale for 150 ms so its standstill auto-tuning completes at 12 V.
 - Detected physical endpoints are measured from the unwrapped AS5600 values. The normal commandable range keeps 5 mm away from each physical endpoint, with 0.2 mm of fault-check tolerance for encoder and microstep rounding.
 - DIAG and power-good loss immediately disable EN and force-stop FastAccelStepper. The queued step position is then replaced with an encoder-derived position.
 - PG is sampled directly before and after every EN activation. An enabled driver can never coexist with bad PG in the controller state; a missed edge is caught by the main-loop invariant and latches `POWER_LOSS`.
-- Encoder hard-stop protection compares commanded travel with encoder travel from the start of the current move. A tracking error of at least 164 AS5600 counts must remain present for 125 ms before it trips, so obstruction detection still works at low speed without reacting to brief belt or shaft transients.
+- Encoder hard-stop protection compares commanded and observed shaft movement over a rolling 125 ms window. It trips when their difference reaches 164 AS5600 counts; error is never accumulated across windows.
 - Five consecutive AS5600 sample failures (about 25 ms) latch `ENCODER_FAULT` whenever the controller is homed or the driver is enabled. New move and velocity commands are rejected while the latest encoder sample is invalid.
 - The TMC2209 UART and driver status are checked at startup, before configuration or enable transitions, and after a homing DIAG stop before accepting the endpoint. A CRC error or invalid all-ones status latches `TMC_COMM`; serious driver status flags latch `TMC_DRIVER`. No UART polling is performed during motion.
 - Faults are latched. Fault reset leaves the motor disabled and unhomed; a new controlled home is also allowed for recoverable obstruction/homing faults.

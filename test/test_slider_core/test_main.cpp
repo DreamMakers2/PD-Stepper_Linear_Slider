@@ -51,11 +51,12 @@ void test_synchronization_anchor_reconstructs_physical_position() {
   TEST_ASSERT_FLOAT_WITHIN(0.001F, 95.0F, anchor.positionForEncoder(1512));
 }
 
-void test_hard_stop_monitor_trips_after_error_persists() {
+void test_hard_stop_monitor_trips_on_a_blocked_motor() {
   EncoderHardStopMonitor monitor;
   bool tripped = false;
-  for (uint32_t time = 0; time <= 170; time += 5) {
+  for (uint32_t time = 0; time <= 125; time += 5) {
     tripped = monitor.add(MotionSample{time, static_cast<int32_t>(time * 4), 0, 1});
+    if (time < 125) TEST_ASSERT_FALSE(tripped);
   }
   TEST_ASSERT_TRUE(tripped);
 }
@@ -70,40 +71,53 @@ void test_hard_stop_monitor_does_not_trip_when_encoder_tracks() {
   }
 }
 
-void test_hard_stop_monitor_trips_at_low_speed() {
+void test_hard_stop_monitor_tolerates_irregular_sampling() {
   EncoderHardStopMonitor monitor;
   bool tripped = false;
-  for (uint32_t time = 0; time <= 945; time += 5) {
-    const int32_t commanded = static_cast<int32_t>(time / 5);
-    tripped = monitor.add(MotionSample{time, commanded, 0, 1});
-    if (time < 945) TEST_ASSERT_FALSE(tripped);
+  for (uint32_t time = 0; time <= 140; time += 20) {
+    tripped = monitor.add(MotionSample{time, static_cast<int32_t>(time * 4), 0, 1});
+    if (time < 140) TEST_ASSERT_FALSE(tripped);
   }
   TEST_ASSERT_TRUE(tripped);
 }
 
-void test_hard_stop_monitor_requires_continuous_persistence() {
+void test_hard_stop_monitor_does_not_accumulate_across_windows() {
   EncoderHardStopMonitor monitor;
-  TEST_ASSERT_FALSE(monitor.add(MotionSample{0, 0, 0, 1}));
-  TEST_ASSERT_FALSE(monitor.add(MotionSample{5, 164, 0, 1}));
-  TEST_ASSERT_FALSE(monitor.add(MotionSample{100, 170, 10, 1}));
-  TEST_ASSERT_FALSE(monitor.add(MotionSample{200, 334, 170, 1}));
-  TEST_ASSERT_FALSE(monitor.add(MotionSample{320, 340, 170, 1}));
-  TEST_ASSERT_TRUE(monitor.add(MotionSample{325, 345, 170, 1}));
+  for (uint32_t time = 0; time <= 1000; time += 5) {
+    // No 125 ms window contains the required 164 counts of disagreement.
+    const int32_t commanded = static_cast<int32_t>(time * 0.8F);
+    TEST_ASSERT_FALSE(monitor.add(MotionSample{time, commanded, 0, 1}));
+  }
+}
+
+void test_hard_stop_monitor_uses_only_the_latest_window() {
+  EncoderHardStopMonitor monitor;
+  for (uint32_t time = 0; time <= 125; time += 5) {
+    const int32_t commanded = static_cast<int32_t>(time * 4);
+    TEST_ASSERT_FALSE(monitor.add(MotionSample{time, commanded, commanded, 1}));
+  }
+  for (uint32_t time = 130; time < 255; time += 5) {
+    TEST_ASSERT_FALSE(monitor.add(MotionSample{time, 500, 500, 1}));
+  }
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{255, 600, 500, 1}));
 }
 
 void test_hard_stop_monitor_resets_on_reversal() {
   EncoderHardStopMonitor monitor;
   TEST_ASSERT_FALSE(monitor.add(MotionSample{0, 0, 0, 1}));
-  TEST_ASSERT_FALSE(monitor.add(MotionSample{10, 200, 0, 1}));
-  TEST_ASSERT_FALSE(monitor.add(MotionSample{20, 190, 10, -1}));
-  TEST_ASSERT_EQUAL_INT32(0, monitor.trackingErrorCounts());
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{100, 400, 0, 1}));
+  TEST_ASSERT_FALSE(monitor.add(MotionSample{105, 390, 10, -1}));
+  TEST_ASSERT_EQUAL_UINT32(1, monitor.size());
 }
 
 void test_hard_stop_monitor_handles_negative_motion() {
   EncoderHardStopMonitor monitor;
-  TEST_ASSERT_FALSE(monitor.add(MotionSample{0, 0, 0, -1}));
-  TEST_ASSERT_FALSE(monitor.add(MotionSample{5, -200, 0, -1}));
-  TEST_ASSERT_TRUE(monitor.add(MotionSample{130, -210, 0, -1}));
+  bool tripped = false;
+  for (uint32_t time = 0; time <= 125; time += 5) {
+    tripped = monitor.add(
+        MotionSample{time, -static_cast<int32_t>(time * 4), 0, -1});
+  }
+  TEST_ASSERT_TRUE(tripped);
 }
 
 void test_soft_limit_tolerance_allows_endpoint_rounding_but_overrun_faults() {
@@ -162,10 +176,11 @@ int main(int, char**) {
   RUN_TEST(test_encoder_unwraps_in_both_directions);
   RUN_TEST(test_travel_is_derived_from_encoder_endpoint_delta);
   RUN_TEST(test_synchronization_anchor_reconstructs_physical_position);
-  RUN_TEST(test_hard_stop_monitor_trips_after_error_persists);
+  RUN_TEST(test_hard_stop_monitor_trips_on_a_blocked_motor);
   RUN_TEST(test_hard_stop_monitor_does_not_trip_when_encoder_tracks);
-  RUN_TEST(test_hard_stop_monitor_trips_at_low_speed);
-  RUN_TEST(test_hard_stop_monitor_requires_continuous_persistence);
+  RUN_TEST(test_hard_stop_monitor_tolerates_irregular_sampling);
+  RUN_TEST(test_hard_stop_monitor_does_not_accumulate_across_windows);
+  RUN_TEST(test_hard_stop_monitor_uses_only_the_latest_window);
   RUN_TEST(test_hard_stop_monitor_resets_on_reversal);
   RUN_TEST(test_hard_stop_monitor_handles_negative_motion);
   RUN_TEST(test_soft_limit_tolerance_allows_endpoint_rounding_but_overrun_faults);

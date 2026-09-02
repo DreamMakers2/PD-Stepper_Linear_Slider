@@ -30,6 +30,7 @@ class MotionController {
   static constexpr float kHomingDistanceLimitMm = 500.0F;
   static constexpr uint32_t kHomingTimeoutMs = 15000;
   static constexpr uint32_t kBackoffTimeoutMs = 2000;
+  static constexpr uint32_t kStealthChopTuningMs = 150;
   static constexpr uint32_t kEncoderSampleMs = 5;
   static constexpr uint8_t kEncoderFailureThreshold = 5;
   static constexpr uint32_t kTelemetrySampleMs = 500;
@@ -48,6 +49,7 @@ class MotionController {
   void applyPdVoltage(uint8_t voltage);
   void applyTmcConfig(const RuntimeConfig& config);
   void applyHomingConfig();
+  void restoreHomingHoldCurrent();
   void setDirectionPolarity();
 
   bool readEncoder();

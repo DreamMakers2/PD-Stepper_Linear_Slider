@@ -187,7 +187,14 @@ void MotionController::applyHomingConfig() {
   homing.microsteps = 4;
   homing.stallguard_threshold = 20;
   applyTmcConfig(homing);
+  // StealthChop AT#1 requires standstill at the run-current scale.
+  tmc_.rms_current(homing.run_current_ma, 1.0F);
   active_microsteps_ = 4;
+}
+
+void MotionController::restoreHomingHoldCurrent() {
+  tmc_.rms_current(
+      800, config_.standstill_mode == StandstillMode::kNormal ? 0.5F : 0.0F);
 }
 
 void MotionController::setDirectionPolarity() {
@@ -716,7 +723,18 @@ bool MotionController::startHome() {
   stepper_->forceStopAndNewPosition(0);
   target_position_mm_ = 0.0F;
   setSynchronizationAnchor(0.0F);
-  if (!enableDriver()) return false;
+  if (!enableDriver()) {
+    restoreHomingHoldCurrent();
+    return false;
+  }
+  // Let StealthChop complete its >130 ms standstill tuning before AT#2 motion.
+  delay(kStealthChopTuningMs);
+  // AT#1 is retained after returning to the configured homing hold behavior.
+  restoreHomingHoldCurrent();
+  if (!driver_enabled_ || !samplePowerGood()) {
+    handlePowerLoss();
+    return false;
+  }
   startHomingLeg(MotionMode::kHomingMin, -1);
   return true;
 }

@@ -140,7 +140,7 @@ void ApiServer::handleGetConfig(AsyncWebServerRequest* request) {
   JsonObject safety = root["safety"].to<JsonObject>();
   safety["soft_margin_mm"] = 5;
   safety["encoder_error_counts"] = core::kHardStopErrorCounts;
-  safety["encoder_window_ms"] = core::EncoderHardStopMonitor::kPersistenceMs;
+  safety["encoder_window_ms"] = core::EncoderHardStopMonitor::kWindowMs;
   safety["max_normal_speed_mm_s"] = 40;
   safety["max_normal_acceleration_mm_s2"] = 75;
 
