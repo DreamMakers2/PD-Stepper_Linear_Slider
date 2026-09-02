@@ -16,9 +16,9 @@ The project pins the ESP32 Arduino toolchain and motion/driver/network dependenc
 ## Safety model
 
 - Every boot drives TMC `ENN` high before the startup delay and starts disabled and unhomed. Position and velocity commands are rejected until homing succeeds.
-- Homing uses the fixed profile from the concept document and independently limits each seek to 500 mm and 15 seconds.
+- Homing uses the validated fixed 12 V profile: 800 mA RMS, 4x microstepping, 1000 microsteps/s (50 mm/s), 1500 microsteps/s², StallGuard threshold 100, and TCOOLTHRS 210. Each seek is independently limited to 500 mm and 15 seconds.
 - Before the first homing move, StealthChop is powered at the full 800 mA run-current scale for 150 ms so its standstill auto-tuning completes at 12 V.
-- Detected physical endpoints are measured from the unwrapped AS5600 values. The normal commandable range keeps 5 mm away from each physical endpoint, with 0.2 mm of fault-check tolerance for encoder and microstep rounding.
+- Detected physical endpoints are measured from the unwrapped AS5600 values. After both endpoint backoffs, the carriage moves to the calibrated midpoint. The normal commandable range keeps 5 mm away from each physical endpoint, with 0.2 mm of fault-check tolerance for encoder and microstep rounding.
 - DIAG and power-good loss immediately disable EN and force-stop FastAccelStepper. The queued step position is then replaced with an encoder-derived position.
 - PG is sampled directly before and after every EN activation. An enabled driver can never coexist with bad PG in the controller state; a missed edge is caught by the main-loop invariant and latches `POWER_LOSS`.
 - Encoder hard-stop protection compares commanded and observed shaft movement over a rolling 125 ms window. It trips when their difference reaches 164 AS5600 counts; error is never accumulated across windows.
@@ -88,6 +88,8 @@ curl -X PUT http://CONTROLLER_IP/api/config \
 ```
 
 Supported voltages are 5, 9, and 12 V. The default and homing voltage is 12 V; higher PD voltages are rejected. Microsteps are 1, 2, 4, 8, 16, 32, 64, 128, or 256. Standstill modes are `NORMAL`, `FREEWHEELING`, `BRAKING`, and `STRONG_BRAKING`. Configuration is persistent, but homing/calibration is not.
+
+The general StallGuard configuration remains available for the preserved driver controls, but homing always overrides it with the fixed validated threshold above.
 
 The API accepts 100–2000 mA because that is the driver-level range used for validation; this is not a claim that every motor or an uncooled board can safely run at 2 A. Set no more than the motor rating and reduce current if the board or motor becomes hot.
 

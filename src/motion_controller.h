@@ -25,13 +25,15 @@ class MotionController {
   static constexpr float kSoftMarginMm = 5.0F;
   static constexpr float kMaxNormalSpeedMmS = 40.0F;
   static constexpr float kMaxNormalAccelerationMmS2 = 75.0F;
-  static constexpr float kHomingSpeedMmS = 40.0F;
+  static constexpr float kHomingSpeedMmS = 50.0F;
   static constexpr float kHomingAccelerationMmS2 = 75.0F;
   static constexpr float kHomingDistanceLimitMm = 500.0F;
   static constexpr uint32_t kHomingTimeoutMs = 15000;
   static constexpr uint32_t kBackoffTimeoutMs = 2000;
   static constexpr uint32_t kStealthChopTuningMs = 150;
   static constexpr uint32_t kEncoderSampleMs = 5;
+  static constexpr uint8_t kHomingStallguardThreshold = 100;
+  static constexpr uint32_t kHomingTcoolthrs = 210;
   static constexpr uint8_t kEncoderFailureThreshold = 5;
   static constexpr uint32_t kTelemetrySampleMs = 500;
   static constexpr float kVbusDividerRatio = 0.1189427313F;

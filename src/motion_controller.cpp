@@ -185,8 +185,9 @@ void MotionController::applyHomingConfig() {
   homing.pd_voltage_v = 12;
   homing.run_current_ma = 800;
   homing.microsteps = 4;
-  homing.stallguard_threshold = 20;
+  homing.stallguard_threshold = kHomingStallguardThreshold;
   applyTmcConfig(homing);
+  tmc_.TCOOLTHRS(kHomingTcoolthrs);
   // StealthChop AT#1 requires standstill at the run-current scale.
   tmc_.rms_current(homing.run_current_ma, 1.0F);
   active_microsteps_ = 4;
@@ -253,7 +254,7 @@ void MotionController::tick() {
   if (now - last_telemetry_sample_ms_ >= kTelemetrySampleMs) updateSlowTelemetry(now);
 
   processRollingHardStop(now);
-  processMotion(now);
+  processMotion(millis());
   processPendingRequest();
   updateSnapshot();
 }
@@ -415,6 +416,7 @@ void MotionController::processEmergencyEvents() {
     // stopped by the ISR. This is the reference used to repair FAS's position.
     captureEncoderAfterStop();
     driver_enabled_ = false;
+    delay(25);
     resynchronizeStepperFromEncoder(0.0F, false);
     if (!encoder_valid_) enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
     else if (isHoming()) {
@@ -835,6 +837,11 @@ void MotionController::finishHoming() {
   fault_ = FaultCode::kNone;
   fault_reason_ = FaultReason::kNone;
   mode_ = MotionMode::kIdle;
+
+  Command center;
+  center.type = CommandType::kMove;
+  center.position_mm = travel_mm_ * 0.5F;
+  startPositionMove(center);
 }
 
 void MotionController::startPositionMove(const Command& command) {

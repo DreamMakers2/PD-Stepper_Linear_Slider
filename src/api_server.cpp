@@ -129,10 +129,10 @@ void ApiServer::handleGetConfig(AsyncWebServerRequest* request) {
   homing["pd_voltage_v"] = 12;
   homing["run_current_ma"] = 800;
   homing["microsteps"] = 4;
-  homing["speed_microsteps_s"] = 800;
+  homing["speed_microsteps_s"] = 1000;
   homing["acceleration_microsteps_s2"] = 1500;
-  homing["stallguard_threshold"] = 20;
-  homing["tcoolthrs"] = 400;
+  homing["stallguard_threshold"] = 100;
+  homing["tcoolthrs"] = 210;
   homing["seek_distance_limit_mm"] = 500;
   homing["seek_timeout_ms"] = 15000;
   homing["backoff_mm"] = 5;
