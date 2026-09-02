@@ -67,6 +67,66 @@ bool closedLoopMotionReady(bool homed, bool encoder_valid) {
   return homed && encoder_valid;
 }
 
+void DebouncedButton::begin(bool pressed, uint32_t now_ms) {
+  initialized_ = true;
+  candidate_pressed_ = pressed;
+  stable_pressed_ = pressed;
+  armed_ = !pressed;
+  candidate_since_ms_ = now_ms;
+}
+
+ButtonEdge DebouncedButton::update(bool pressed, uint32_t now_ms) {
+  if (!initialized_) {
+    begin(pressed, now_ms);
+    return ButtonEdge::kNone;
+  }
+
+  if (pressed != candidate_pressed_) {
+    candidate_pressed_ = pressed;
+    candidate_since_ms_ = now_ms;
+  }
+  if (candidate_pressed_ == stable_pressed_ ||
+      now_ms - candidate_since_ms_ < kButtonDebounceMs) {
+    return ButtonEdge::kNone;
+  }
+
+  stable_pressed_ = candidate_pressed_;
+  if (!armed_) {
+    if (!stable_pressed_) armed_ = true;
+    return ButtonEdge::kNone;
+  }
+  return stable_pressed_ ? ButtonEdge::kPressed : ButtonEdge::kReleased;
+}
+
+void ButtonPanel::begin(bool left_pressed, bool center_pressed,
+                        bool right_pressed, uint32_t now_ms) {
+  left_.begin(left_pressed, now_ms);
+  center_.begin(center_pressed, now_ms);
+  right_.begin(right_pressed, now_ms);
+  center_pressed_since_ms_ = now_ms;
+}
+
+ButtonPanelUpdate ButtonPanel::update(bool left_pressed, bool center_pressed,
+                                      bool right_pressed, uint32_t now_ms) {
+  ButtonPanelUpdate result;
+  result.left = left_.update(left_pressed, now_ms);
+  result.center = center_.update(center_pressed, now_ms);
+  result.right = right_.update(right_pressed, now_ms);
+
+  if (result.center == ButtonEdge::kPressed) {
+    center_pressed_since_ms_ = now_ms;
+  } else if (result.center == ButtonEdge::kReleased) {
+    result.home_requested =
+        now_ms - center_pressed_since_ms_ >= kCenterLongPressMs;
+  }
+  return result;
+}
+
+int8_t ButtonPanel::jogDirection() const {
+  if (left_.pressed() == right_.pressed()) return 0;
+  return left_.pressed() ? -1 : 1;
+}
+
 void EncoderUnwrapper::reset(uint16_t raw_count) {
   initialized_ = true;
   previous_raw_ = raw_count & 0x0FFFU;

@@ -26,4 +26,9 @@ constexpr uint8_t kVbusAdc = 4;
 constexpr uint8_t kLed1 = 10;
 constexpr uint8_t kLed2 = 12;
 
+constexpr uint8_t kButtonLeft = 35;
+constexpr uint8_t kButtonCenter = 36;
+constexpr uint8_t kButtonRight = 37;
+constexpr bool kButtonsActiveLow = true;
+
 }  // namespace slider::pins

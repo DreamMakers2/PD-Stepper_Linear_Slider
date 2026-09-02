@@ -1,11 +1,114 @@
 #include <unity.h>
 
+#include "board_pins.h"
 #include "slider_core.h"
+#include "slider_types.h"
 
+using slider::core::ButtonEdge;
+using slider::core::ButtonPanel;
 using slider::core::EncoderUnwrapper;
 using slider::core::EncoderHardStopMonitor;
 using slider::core::MotionSample;
 using slider::core::SynchronizationAnchor;
+
+void test_button_pin_mapping() {
+  TEST_ASSERT_EQUAL_UINT8(35, slider::pins::kButtonLeft);
+  TEST_ASSERT_EQUAL_UINT8(36, slider::pins::kButtonCenter);
+  TEST_ASSERT_EQUAL_UINT8(37, slider::pins::kButtonRight);
+  TEST_ASSERT_TRUE(slider::pins::kButtonsActiveLow);
+}
+
+void test_button_debounce_filters_bounce_and_reports_edges() {
+  ButtonPanel buttons;
+  buttons.begin(false, false, false, 0);
+
+  TEST_ASSERT_EQUAL(static_cast<int>(ButtonEdge::kNone),
+                    static_cast<int>(buttons.update(true, false, false, 5).left));
+  buttons.update(false, false, false, 8);
+  buttons.update(true, false, false, 10);
+  TEST_ASSERT_EQUAL(static_cast<int>(ButtonEdge::kNone),
+                    static_cast<int>(buttons.update(true, false, false, 19).left));
+  TEST_ASSERT_EQUAL(static_cast<int>(ButtonEdge::kPressed),
+                    static_cast<int>(buttons.update(true, false, false, 20).left));
+  TEST_ASSERT_EQUAL_INT8(-1, buttons.jogDirection());
+
+  buttons.update(false, false, false, 30);
+  TEST_ASSERT_EQUAL(static_cast<int>(ButtonEdge::kReleased),
+                    static_cast<int>(buttons.update(false, false, false, 40).left));
+  TEST_ASSERT_EQUAL_INT8(0, buttons.jogDirection());
+}
+
+void test_button_held_at_boot_arms_only_after_release() {
+  ButtonPanel buttons;
+  buttons.begin(true, false, false, 0);
+  TEST_ASSERT_FALSE(buttons.update(true, false, false, 1000).left ==
+                    ButtonEdge::kPressed);
+
+  buttons.update(false, false, false, 1010);
+  TEST_ASSERT_EQUAL(static_cast<int>(ButtonEdge::kNone),
+                    static_cast<int>(buttons.update(false, false, false, 1020).left));
+  buttons.update(true, false, false, 1030);
+  TEST_ASSERT_EQUAL(static_cast<int>(ButtonEdge::kPressed),
+                    static_cast<int>(buttons.update(true, false, false, 1040).left));
+}
+
+void test_center_held_at_boot_does_not_request_home_on_release() {
+  ButtonPanel buttons;
+  buttons.begin(false, true, false, 0);
+  TEST_ASSERT_FALSE(buttons.update(false, true, false, 2000).home_requested);
+  buttons.update(false, false, false, 2010);
+  const auto released = buttons.update(false, false, false, 2020);
+  TEST_ASSERT_EQUAL(static_cast<int>(ButtonEdge::kNone),
+                    static_cast<int>(released.center));
+  TEST_ASSERT_FALSE(released.home_requested);
+}
+
+void test_center_long_press_requests_home_on_release_only() {
+  ButtonPanel buttons;
+  buttons.begin(false, false, false, 0);
+  buttons.update(false, true, false, 100);
+  TEST_ASSERT_EQUAL(static_cast<int>(ButtonEdge::kPressed),
+                    static_cast<int>(buttons.update(false, true, false, 110).center));
+  TEST_ASSERT_FALSE(buttons.update(false, true, false, 1099).home_requested);
+  buttons.update(false, false, false, 1100);
+  const auto released = buttons.update(false, false, false, 1110);
+  TEST_ASSERT_EQUAL(static_cast<int>(ButtonEdge::kReleased),
+                    static_cast<int>(released.center));
+  TEST_ASSERT_TRUE(released.home_requested);
+}
+
+void test_center_short_press_does_not_request_home() {
+  ButtonPanel buttons;
+  buttons.begin(false, false, false, 0);
+  buttons.update(false, true, false, 100);
+  buttons.update(false, true, false, 110);
+  buttons.update(false, false, false, 1000);
+  TEST_ASSERT_FALSE(buttons.update(false, false, false, 1010).home_requested);
+}
+
+void test_center_long_press_timing_is_wrap_safe() {
+  ButtonPanel buttons;
+  constexpr uint32_t start = UINT32_MAX - 30U;
+  buttons.begin(false, false, false, start);
+  buttons.update(false, true, false, start + 5U);
+  buttons.update(false, true, false, start + 15U);
+  buttons.update(false, false, false, start + 1015U);
+  TEST_ASSERT_TRUE(
+      buttons.update(false, false, false, start + 1025U).home_requested);
+}
+
+void test_simultaneous_side_buttons_have_neutral_direction() {
+  ButtonPanel buttons;
+  buttons.begin(false, false, false, 0);
+  buttons.update(true, false, true, 10);
+  const auto pressed = buttons.update(true, false, true, 20);
+  TEST_ASSERT_EQUAL(static_cast<int>(ButtonEdge::kPressed),
+                    static_cast<int>(pressed.left));
+  TEST_ASSERT_EQUAL(static_cast<int>(ButtonEdge::kPressed),
+                    static_cast<int>(pressed.right));
+  TEST_ASSERT_TRUE(buttons.bothSideButtonsPressed());
+  TEST_ASSERT_EQUAL_INT8(0, buttons.jogDirection());
+}
 
 void test_pd_voltage_is_capped_at_12_volts() {
   TEST_ASSERT_TRUE(slider::core::isSupportedPdVoltage(5));
@@ -21,6 +124,41 @@ void test_physical_unit_conversions() {
   TEST_ASSERT_EQUAL_INT32(800, slider::core::millimetresToMicrosteps(40.0F, 4));
   TEST_ASSERT_EQUAL_INT32(4096, slider::core::microstepsToEncoderCounts(800, 4));
   TEST_ASSERT_EQUAL_INT32(512, slider::core::millimetresToEncoderCounts(5.0F));
+}
+
+void test_all_microstep_scales_preserve_physical_coordinates() {
+  constexpr uint16_t microsteps[] = {1, 2, 4, 8, 16, 32, 64, 128, 256};
+  constexpr float position_mm = 123.4F;
+  for (const uint16_t scale : microsteps) {
+    const int32_t steps = slider::core::millimetresToMicrosteps(position_mm, scale);
+    const float recovered = slider::core::microstepsToMillimetres(steps, scale);
+    const float half_step_mm = 10.0F / static_cast<float>(scale * 100);
+    TEST_ASSERT_FLOAT_WITHIN(half_step_mm + 0.0001F, position_mm, recovered);
+  }
+
+  TEST_ASSERT_EQUAL_INT32(24000,
+                          slider::core::millimetresToMicrosteps(150.0F, 32));
+  TEST_ASSERT_EQUAL_INT32(192000,
+                          slider::core::millimetresToMicrosteps(150.0F, 256));
+}
+
+void test_public_full_step_maps_to_tmcstepper_zero() {
+  TEST_ASSERT_EQUAL_UINT16(0, slider::core::tmcLibraryMicrosteps(1));
+  TEST_ASSERT_EQUAL_UINT16(1, slider::core::publicMicrosteps(0));
+  TEST_ASSERT_EQUAL_UINT16(32, slider::core::tmcLibraryMicrosteps(32));
+  TEST_ASSERT_EQUAL_UINT16(32, slider::core::publicMicrosteps(32));
+}
+
+void test_runtime_defaults_and_limits() {
+  const slider::RuntimeConfig config;
+  TEST_ASSERT_EQUAL_UINT16(32, config.microsteps);
+  TEST_ASSERT_EQUAL(static_cast<int>(slider::StandstillMode::kFreewheeling),
+                    static_cast<int>(config.standstill_mode));
+  TEST_ASSERT_FLOAT_WITHIN(0.001F, 50.0F, config.default_speed_mm_s);
+  TEST_ASSERT_FLOAT_WITHIN(0.001F, 75.0F, config.default_acceleration_mm_s2);
+  TEST_ASSERT_FLOAT_WITHIN(0.001F, 150.0F, slider::runtime::kMaxSpeedMmS);
+  TEST_ASSERT_FLOAT_WITHIN(0.001F, 300.0F,
+                           slider::runtime::kMaxAccelerationMmS2);
 }
 
 void test_encoder_unwraps_in_both_directions() {
@@ -171,8 +309,19 @@ void test_closed_loop_motion_requires_a_currently_valid_encoder() {
 
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_button_pin_mapping);
+  RUN_TEST(test_button_debounce_filters_bounce_and_reports_edges);
+  RUN_TEST(test_button_held_at_boot_arms_only_after_release);
+  RUN_TEST(test_center_held_at_boot_does_not_request_home_on_release);
+  RUN_TEST(test_center_long_press_requests_home_on_release_only);
+  RUN_TEST(test_center_short_press_does_not_request_home);
+  RUN_TEST(test_center_long_press_timing_is_wrap_safe);
+  RUN_TEST(test_simultaneous_side_buttons_have_neutral_direction);
   RUN_TEST(test_pd_voltage_is_capped_at_12_volts);
   RUN_TEST(test_physical_unit_conversions);
+  RUN_TEST(test_all_microstep_scales_preserve_physical_coordinates);
+  RUN_TEST(test_public_full_step_maps_to_tmcstepper_zero);
+  RUN_TEST(test_runtime_defaults_and_limits);
   RUN_TEST(test_encoder_unwraps_in_both_directions);
   RUN_TEST(test_travel_is_derived_from_encoder_endpoint_delta);
   RUN_TEST(test_synchronization_anchor_reconstructs_physical_position);

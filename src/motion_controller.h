@@ -23,10 +23,15 @@ class MotionController {
 
  private:
   static constexpr float kSoftMarginMm = 5.0F;
-  static constexpr float kMaxNormalSpeedMmS = 40.0F;
-  static constexpr float kMaxNormalAccelerationMmS2 = 75.0F;
+  static constexpr uint8_t kHomingPdVoltageV = 12;
+  static constexpr uint16_t kHomingRunCurrentMa = 800;
+  static constexpr uint16_t kHomingMicrosteps = 4;
+  static constexpr float kRuntimeNormalHoldMultiplier = 0.30F;
+  static constexpr float kHomingHoldMultiplier = 0.50F;
   static constexpr float kHomingSpeedMmS = 50.0F;
   static constexpr float kHomingAccelerationMmS2 = 75.0F;
+  static constexpr float kHomingCenterSpeedMmS = 40.0F;
+  static constexpr float kHomingCenterAccelerationMmS2 = 75.0F;
   static constexpr float kHomingDistanceLimitMm = 500.0F;
   static constexpr uint32_t kHomingTimeoutMs = 15000;
   static constexpr uint32_t kBackoffTimeoutMs = 2000;
@@ -40,6 +45,7 @@ class MotionController {
 
   static void IRAM_ATTR diagIsr(void* argument);
   static void IRAM_ATTR powerGoodIsr(void* argument);
+  static void IRAM_ATTR centerButtonIsr(void* argument);
   void IRAM_ATTR emergencyIsr(volatile bool& flag);
 
   void initializePins();
@@ -68,12 +74,19 @@ class MotionController {
   void resynchronizeStepperFromEncoder(float override_position_mm, bool use_override);
 
   void processEmergencyEvents();
+  bool processCenterStopEvent();
   void processUrgentRequests();
   void processPendingRequest();
   void processMotion(uint32_t now);
   void processRollingHardStop(uint32_t now);
+  void processButtons(uint32_t now);
+  void synchronizeIdlePosition();
 
   bool enableDriver();
+  bool armPhysicalMotion();
+  bool captureAndSynchronizeHomedPosition(bool enforce_soft_limits);
+  bool captureStableEncoderPosition();
+  bool prepareNormalMotion();
   void handlePowerLoss();
   void stopMotionAndResynchronize();
   void disableDriver(bool invalidate_home);
@@ -84,10 +97,11 @@ class MotionController {
   void startHomingLeg(MotionMode mode, int8_t direction);
   void handleHomingDiag();
   void startBackoff(MotionMode mode, float target_mm);
-  void finishHoming();
-  void startPositionMove(const Command& command);
-  void startVelocityMove(const Command& command);
-  void setMotionProfile(float speed_mm_s, float acceleration_mm_s2);
+  void startHomingCenter();
+  void completeHoming();
+  void startPositionMove(const Command& command, int8_t button_direction = 0);
+  void startVelocityMove(const Command& command, int8_t button_direction = 0);
+  bool setMotionProfile(float speed_mm_s, float acceleration_mm_s2);
 
   void updateSnapshot();
   bool isHoming() const;
@@ -107,18 +121,24 @@ class MotionController {
   core::EncoderUnwrapper encoder_unwrapper_{};
   core::EncoderHardStopMonitor motion_monitor_{};
   core::SynchronizationAnchor sync_anchor_{};
+  core::ButtonPanel buttons_{};
   bool sync_anchor_valid_ = false;
 
   volatile bool diag_event_ = false;
   volatile bool power_event_ = false;
   volatile bool motion_armed_ = false;
+  volatile bool physical_motion_active_ = false;
+  volatile bool center_stop_event_ = false;
+  volatile bool center_stop_latched_ = false;
   bool diag_requires_clear_ = false;
   volatile bool urgent_stop_ = false;
   volatile bool urgent_disable_ = false;
 
   bool pending_command_ = false;
   Command command_{};
+  int8_t queued_button_jog_direction_ = 0;
   bool pending_config_ = false;
+  bool request_in_progress_ = false;
   RuntimeConfig requested_config_{};
 
   MotionMode mode_ = MotionMode::kDisabled;
@@ -126,6 +146,11 @@ class MotionController {
   FaultReason fault_reason_ = FaultReason::kNone;
   volatile bool driver_enabled_ = false;
   bool homed_ = false;
+  bool homing_center_active_ = false;
+  int8_t button_jog_direction_ = 0;
+  bool side_buttons_inhibited_ = false;
+  bool center_release_pending_ = false;
+  uint32_t center_release_since_ms_ = 0;
 
   bool encoder_valid_ = false;
   uint16_t encoder_raw_ = 0;

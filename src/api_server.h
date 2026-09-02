@@ -13,6 +13,7 @@ class ApiServer {
   void begin();
 
  private:
+  void handleHelp(AsyncWebServerRequest* request);
   void handleState(AsyncWebServerRequest* request);
   void handleGetConfig(AsyncWebServerRequest* request);
   void handleCommand(AsyncWebServerRequest* request, JsonVariant& json);

@@ -4,6 +4,15 @@
 
 namespace slider {
 
+namespace runtime {
+
+constexpr float kDefaultSpeedMmS = 50.0F;
+constexpr float kDefaultAccelerationMmS2 = 75.0F;
+constexpr float kMaxSpeedMmS = 150.0F;
+constexpr float kMaxAccelerationMmS2 = 300.0F;
+
+}  // namespace runtime
+
 enum class MotionMode : uint8_t {
   kDisabled,
   kIdle,
@@ -62,9 +71,11 @@ enum class CommandType : uint8_t {
 struct RuntimeConfig {
   uint8_t pd_voltage_v = 12;
   uint16_t run_current_ma = 800;
-  uint16_t microsteps = 4;
+  uint16_t microsteps = 32;
   uint8_t stallguard_threshold = 20;
-  StandstillMode standstill_mode = StandstillMode::kNormal;
+  StandstillMode standstill_mode = StandstillMode::kFreewheeling;
+  float default_speed_mm_s = runtime::kDefaultSpeedMmS;
+  float default_acceleration_mm_s2 = runtime::kDefaultAccelerationMmS2;
   bool invert_direction = false;
   bool invert_encoder = false;
 };
@@ -73,8 +84,8 @@ struct Command {
   CommandType type = CommandType::kStop;
   float position_mm = 0.0F;
   float velocity_mm_s = 0.0F;
-  float speed_mm_s = 40.0F;
-  float acceleration_mm_s2 = 75.0F;
+  float speed_mm_s = runtime::kDefaultSpeedMmS;
+  float acceleration_mm_s2 = runtime::kDefaultAccelerationMmS2;
 };
 
 struct StateSnapshot {

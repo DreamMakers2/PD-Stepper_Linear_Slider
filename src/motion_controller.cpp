@@ -61,6 +61,8 @@ bool MotionController::begin() {
 
   attachInterruptArg(digitalPinToInterrupt(pins::kDiag), diagIsr, this, RISING);
   attachInterruptArg(digitalPinToInterrupt(pins::kPowerGood), powerGoodIsr, this, RISING);
+  attachInterruptArg(digitalPinToInterrupt(pins::kButtonCenter), centerButtonIsr, this,
+                     FALLING);
 
   samplePowerGood();
   if (tmc_ready) mode_ = MotionMode::kDisabled;
@@ -93,6 +95,13 @@ void MotionController::initializePins() {
   pinMode(pins::kLed2, OUTPUT);
   digitalWrite(pins::kLed1, LOW);
   digitalWrite(pins::kLed2, LOW);
+  pinMode(pins::kButtonLeft, INPUT);
+  pinMode(pins::kButtonCenter, INPUT);
+  pinMode(pins::kButtonRight, INPUT);
+  const uint32_t now = millis();
+  buttons_.begin(digitalRead(pins::kButtonLeft) == LOW,
+                 digitalRead(pins::kButtonCenter) == LOW,
+                 digitalRead(pins::kButtonRight) == LOW, now);
 }
 
 bool MotionController::initializeStepper() {
@@ -101,7 +110,6 @@ bool MotionController::initializeStepper() {
   if (stepper_ == nullptr) return false;
   setDirectionPolarity();
   stepper_->setEnablePin(pins::kTmcEnable, true);
-  stepper_->setDelayToEnable(2);
   stepper_->disableOutputs();
   return true;
 }
@@ -128,6 +136,10 @@ void MotionController::loadConfig() {
   config_.stallguard_threshold = preferences_.getUChar("sg", config_.stallguard_threshold);
   config_.standstill_mode = static_cast<StandstillMode>(
       preferences_.getUChar("standstill", static_cast<uint8_t>(config_.standstill_mode)));
+  config_.default_speed_mm_s =
+      preferences_.getFloat("default_spd", config_.default_speed_mm_s);
+  config_.default_acceleration_mm_s2 =
+      preferences_.getFloat("default_acc", config_.default_acceleration_mm_s2);
   config_.invert_direction = preferences_.getBool("inv_dir", config_.invert_direction);
   config_.invert_encoder = preferences_.getBool("inv_enc", config_.invert_encoder);
   preferences_.end();
@@ -143,6 +155,8 @@ void MotionController::saveConfig() {
   preferences_.putUShort("microsteps", config_.microsteps);
   preferences_.putUChar("sg", config_.stallguard_threshold);
   preferences_.putUChar("standstill", static_cast<uint8_t>(config_.standstill_mode));
+  preferences_.putFloat("default_spd", config_.default_speed_mm_s);
+  preferences_.putFloat("default_acc", config_.default_acceleration_mm_s2);
   preferences_.putBool("inv_dir", config_.invert_direction);
   preferences_.putBool("inv_enc", config_.invert_encoder);
   preferences_.end();
@@ -152,7 +166,13 @@ bool MotionController::validateConfig(const RuntimeConfig& value) const {
   return core::isSupportedPdVoltage(value.pd_voltage_v) &&
          value.run_current_ma >= 100 && value.run_current_ma <= 2000 &&
          isSupportedMicrosteps(value.microsteps) &&
-         static_cast<uint8_t>(value.standstill_mode) <= 3;
+         static_cast<uint8_t>(value.standstill_mode) <= 3 &&
+         std::isfinite(value.default_speed_mm_s) &&
+         value.default_speed_mm_s > 0.0F &&
+         value.default_speed_mm_s <= runtime::kMaxSpeedMmS &&
+         std::isfinite(value.default_acceleration_mm_s2) &&
+         value.default_acceleration_mm_s2 > 0.0F &&
+         value.default_acceleration_mm_s2 <= runtime::kMaxAccelerationMmS2;
 }
 
 void MotionController::applyPdVoltage(uint8_t voltage) {
@@ -169,9 +189,11 @@ void MotionController::applyPdVoltage(uint8_t voltage) {
 }
 
 void MotionController::applyTmcConfig(const RuntimeConfig& value) {
-  const float hold_multiplier = value.standstill_mode == StandstillMode::kNormal ? 0.5F : 0.0F;
+  const float hold_multiplier = value.standstill_mode == StandstillMode::kNormal
+                                    ? kRuntimeNormalHoldMultiplier
+                                    : 0.0F;
   tmc_.rms_current(value.run_current_ma, hold_multiplier);
-  tmc_.microsteps(value.microsteps);
+  tmc_.microsteps(core::tmcLibraryMicrosteps(value.microsteps));
   tmc_.en_spreadCycle(false);
   tmc_.pwm_autoscale(true);
   tmc_.pwm_autograd(true);
@@ -181,21 +203,24 @@ void MotionController::applyTmcConfig(const RuntimeConfig& value) {
 }
 
 void MotionController::applyHomingConfig() {
-  RuntimeConfig homing = config_;
-  homing.pd_voltage_v = 12;
-  homing.run_current_ma = 800;
-  homing.microsteps = 4;
+  RuntimeConfig homing;
+  homing.pd_voltage_v = kHomingPdVoltageV;
+  homing.run_current_ma = kHomingRunCurrentMa;
+  homing.microsteps = kHomingMicrosteps;
   homing.stallguard_threshold = kHomingStallguardThreshold;
+  homing.standstill_mode = StandstillMode::kNormal;
   applyTmcConfig(homing);
   tmc_.TCOOLTHRS(kHomingTcoolthrs);
   // StealthChop AT#1 requires standstill at the run-current scale.
-  tmc_.rms_current(homing.run_current_ma, 1.0F);
-  active_microsteps_ = 4;
+  tmc_.rms_current(kHomingRunCurrentMa, 1.0F);
+  active_microsteps_ = kHomingMicrosteps;
 }
 
 void MotionController::restoreHomingHoldCurrent() {
-  tmc_.rms_current(
-      800, config_.standstill_mode == StandstillMode::kNormal ? 0.5F : 0.0F);
+  // Deterministic choice based on the repository's previous/default NORMAL
+  // behavior. The hardware-test NVS standstill value was not recorded.
+  tmc_.freewheel(static_cast<uint8_t>(StandstillMode::kNormal));
+  tmc_.rms_current(kHomingRunCurrentMa, kHomingHoldMultiplier);
 }
 
 void MotionController::setDirectionPolarity() {
@@ -214,6 +239,21 @@ void IRAM_ATTR MotionController::powerGoodIsr(void* argument) {
   if (self != nullptr && self->driver_enabled_) self->emergencyIsr(self->power_event_);
 }
 
+void IRAM_ATTR MotionController::centerButtonIsr(void* argument) {
+  auto* self = static_cast<MotionController*>(argument);
+  if (self == nullptr || !self->physical_motion_active_) return;
+
+  digitalWrite(pins::kTmcEnable, HIGH);
+  if (self->stepper_ != nullptr) self->stepper_->forceStop();
+  self->driver_enabled_ = false;
+  self->motion_armed_ = false;
+  self->physical_motion_active_ = false;
+  portENTER_CRITICAL_ISR(&self->data_mux_);
+  self->center_stop_event_ = true;
+  self->center_stop_latched_ = true;
+  portEXIT_CRITICAL_ISR(&self->data_mux_);
+}
+
 void IRAM_ATTR MotionController::emergencyIsr(volatile bool& flag) {
   digitalWrite(pins::kTmcEnable, HIGH);
   if (stepper_ != nullptr) stepper_->forceStop();
@@ -226,6 +266,11 @@ void IRAM_ATTR MotionController::emergencyIsr(volatile bool& flag) {
 
 void MotionController::tick() {
   const uint32_t now = millis();
+  if (processCenterStopEvent()) {
+    processButtons(now);
+    updateSnapshot();
+    return;
+  }
   samplePowerGood();
   if (core::powerGoodInvariantViolated(driver_enabled_, power_good_)) {
     handlePowerLoss();
@@ -244,6 +289,11 @@ void MotionController::tick() {
 
   updateFastTelemetry(now);
   processEmergencyEvents();
+  if (processCenterStopEvent()) {
+    processButtons(now);
+    updateSnapshot();
+    return;
+  }
   processUrgentRequests();
 
   if (core::encoderLossRequiresFault(homed_, driver_enabled_, encoder_read_failures_,
@@ -256,7 +306,14 @@ void MotionController::tick() {
   processRollingHardStop(now);
   processMotion(millis());
   processPendingRequest();
+  processButtons(millis());
+  synchronizeIdlePosition();
   updateSnapshot();
+  // Do not accept another asynchronous request until this request's resulting
+  // state has been published.
+  portENTER_CRITICAL(&data_mux_);
+  request_in_progress_ = false;
+  portEXIT_CRITICAL(&data_mux_);
 }
 
 bool MotionController::readEncoder() {
@@ -295,7 +352,6 @@ bool MotionController::samplePowerGood() {
 void MotionController::updateFastTelemetry(uint32_t now) {
   (void)now;
   diag_state_ = digitalRead(pins::kDiag) == HIGH;
-  digitalWrite(pins::kLed2, diag_state_ ? HIGH : LOW);
   if (isMoving() && !motion_armed_ &&
       static_cast<int32_t>(millis() - diag_arm_after_ms_) >= 0) {
     if (diag_requires_clear_ && diag_state_) return;
@@ -303,7 +359,7 @@ void MotionController::updateFastTelemetry(uint32_t now) {
     motion_armed_ = true;
     if (diag_state_) {
       digitalWrite(pins::kTmcEnable, HIGH);
-      stepper_->forceStop();
+      if (stepper_ != nullptr) stepper_->forceStop();
       motion_armed_ = false;
       diag_event_ = true;
     }
@@ -329,7 +385,12 @@ bool MotionController::checkTmc() {
 
   tmc_status_raw_ = status;
   const uint16_t stallguard = tmc_.SG_RESULT();
-  if (!tmc_.CRCerror) stallguard_result_ = stallguard;
+  if (tmc_.CRCerror) {
+    tmc_uart_ok_ = false;
+    enterFault(FaultCode::kTmcComm, FaultReason::kReadFailed);
+    return false;
+  }
+  stallguard_result_ = stallguard;
   if ((status & kTmcSeriousFaultMask) != 0) {
     enterFault(FaultCode::kTmcDriver,
                (status & 0x02U) != 0 ? FaultReason::kOverTemperature
@@ -370,8 +431,10 @@ void MotionController::setSynchronizationAnchor(float logical_position_mm) {
   }
   sync_anchor_.encoder_counts = encoder_counts_;
   sync_anchor_.logical_position_mm = logical_position_mm;
-  sync_anchor_.encoder_sign = homed_ ? calibrated_encoder_sign_
-                                    : (config_.invert_encoder ? -1 : 1);
+  const bool calibration_available = encoder_min_counts_ != encoder_max_counts_;
+  sync_anchor_.encoder_sign = calibration_available
+                                  ? calibrated_encoder_sign_
+                                  : (config_.invert_encoder ? -1 : 1);
   sync_anchor_valid_ = true;
 }
 
@@ -397,6 +460,7 @@ void MotionController::resynchronizeStepperFromEncoder(float override_position_m
 }
 
 void MotionController::processEmergencyEvents() {
+  if (center_stop_latched_) return;
   bool power_event = false;
   bool diag_event = false;
   portENTER_CRITICAL(&data_mux_);
@@ -405,6 +469,15 @@ void MotionController::processEmergencyEvents() {
   power_event_ = false;
   diag_event_ = false;
   portEXIT_CRITICAL(&data_mux_);
+
+  if (diag_event && digitalRead(pins::kButtonCenter) == LOW) {
+    portENTER_CRITICAL(&data_mux_);
+    center_stop_event_ = true;
+    center_stop_latched_ = true;
+    if (power_event) power_event_ = true;
+    portEXIT_CRITICAL(&data_mux_);
+    return;
+  }
 
   if (power_event) {
     handlePowerLoss();
@@ -425,6 +498,39 @@ void MotionController::processEmergencyEvents() {
   }
 }
 
+bool MotionController::processCenterStopEvent() {
+  bool event = false;
+  portENTER_CRITICAL(&data_mux_);
+  event = center_stop_event_;
+  center_stop_event_ = false;
+  if (event) {
+    pending_command_ = false;
+    queued_button_jog_direction_ = 0;
+    pending_config_ = false;
+    urgent_stop_ = false;
+    urgent_disable_ = false;
+    diag_event_ = false;
+  }
+  portEXIT_CRITICAL(&data_mux_);
+  if (!event) return false;
+
+  if (stepper_ != nullptr) {
+    captureEncoderAfterStop();
+    // Match the existing emergency-stop queue-settling behavior before
+    // replacing FastAccelStepper's queued position.
+    delay(25);
+    resynchronizeStepperFromEncoder(0.0F, false);
+  }
+  homing_center_active_ = false;
+  button_jog_direction_ = 0;
+  disableDriver(true);
+  requested_velocity_mm_s_ = 0.0F;
+  target_position_mm_ = 0.0F;
+  sync_anchor_valid_ = false;
+  mode_ = MotionMode::kDisabled;
+  return true;
+}
+
 void MotionController::processUrgentRequests() {
   bool stop = false;
   bool disable = false;
@@ -435,12 +541,14 @@ void MotionController::processUrgentRequests() {
   urgent_disable_ = false;
   if (stop || disable) {
     pending_command_ = false;
+    queued_button_jog_direction_ = 0;
     pending_config_ = false;
   }
   portEXIT_CRITICAL(&data_mux_);
 
   if (disable) {
     stopMotionAndResynchronize();
+    button_jog_direction_ = 0;
     disableDriver(true);
     mode_ = fault_ == FaultCode::kNone ? MotionMode::kDisabled : MotionMode::kFaulted;
     return;
@@ -449,6 +557,7 @@ void MotionController::processUrgentRequests() {
 
   const bool homing = isHoming();
   stopMotionAndResynchronize();
+  button_jog_direction_ = 0;
   if (homing) {
     disableDriver(true);
     mode_ = MotionMode::kDisabled;
@@ -458,30 +567,46 @@ void MotionController::processUrgentRequests() {
 }
 
 void MotionController::processPendingRequest() {
+  if (center_stop_latched_) return;
   Command command;
   RuntimeConfig requested;
   bool has_command = false;
   bool has_config = false;
+  int8_t queued_button_jog_direction = 0;
   portENTER_CRITICAL(&data_mux_);
+  if (request_in_progress_) {
+    portEXIT_CRITICAL(&data_mux_);
+    return;
+  }
   if (pending_command_) {
     command = command_;
-    pending_command_ = false;
+    queued_button_jog_direction = queued_button_jog_direction_;
     has_command = true;
   } else if (pending_config_) {
     requested = requested_config_;
-    pending_config_ = false;
     has_config = true;
   }
+  request_in_progress_ = has_command || has_config;
   portEXIT_CRITICAL(&data_mux_);
+
+  const auto clear_processed_request = [this, has_command, has_config]() {
+    portENTER_CRITICAL(&data_mux_);
+    if (has_command) {
+      pending_command_ = false;
+      queued_button_jog_direction_ = 0;
+    }
+    if (has_config) pending_config_ = false;
+    portEXIT_CRITICAL(&data_mux_);
+  };
 
   if (has_config) {
     if ((mode_ != MotionMode::kDisabled && mode_ != MotionMode::kIdle) ||
         fault_ != FaultCode::kNone) {
+      clear_processed_request();
       return;
     }
     const bool was_enabled = driver_enabled_;
-    const bool invalidates_home = requested.microsteps != config_.microsteps ||
-                                  requested.invert_direction != config_.invert_direction ||
+    const bool invalidates_home = requested.invert_direction != config_.invert_direction ||
                                   requested.invert_encoder != config_.invert_encoder;
     stopMotionAndResynchronize();
     disableDriver(invalidates_home);
@@ -495,12 +620,33 @@ void MotionController::processPendingRequest() {
     setDirectionPolarity();
     active_microsteps_ = config_.microsteps;
     applyTmcConfig(config_);
-    if (!checkTmc()) return;
-    samplePowerGood();
-    if (was_enabled && !invalidates_home && !enableDriver()) {
+    const uint16_t configured_microsteps = core::publicMicrosteps(tmc_.microsteps());
+    if (tmc_.CRCerror || configured_microsteps != config_.microsteps) {
+      enterFault(FaultCode::kTmcComm, FaultReason::kReadFailed);
+      clear_processed_request();
       return;
     }
+    if (!checkTmc()) {
+      clear_processed_request();
+      return;
+    }
+    samplePowerGood();
+    if (homed_ && !captureAndSynchronizeHomedPosition(true)) {
+      disableDriver(false);
+      mode_ = fault_ == FaultCode::kNone ? MotionMode::kIdle : MotionMode::kFaulted;
+      clear_processed_request();
+      return;
+    }
+    if (was_enabled && !invalidates_home) {
+      if (!enableDriver() || !captureAndSynchronizeHomedPosition(true)) {
+        disableDriver(false);
+        mode_ = fault_ == FaultCode::kNone ? MotionMode::kIdle : MotionMode::kFaulted;
+        clear_processed_request();
+        return;
+      }
+    }
     mode_ = driver_enabled_ ? MotionMode::kIdle : MotionMode::kDisabled;
+    clear_processed_request();
     return;
   }
   if (!has_command) return;
@@ -508,7 +654,12 @@ void MotionController::processPendingRequest() {
   switch (command.type) {
     case CommandType::kHome: startHome(); break;
     case CommandType::kMove: startPositionMove(command); break;
-    case CommandType::kVelocity: startVelocityMove(command); break;
+    case CommandType::kVelocity:
+      startVelocityMove(command, queued_button_jog_direction);
+      if (physical_motion_active_ && queued_button_jog_direction != 0) {
+        button_jog_direction_ = queued_button_jog_direction;
+      }
+      break;
     case CommandType::kEnable:
       if ((mode_ == MotionMode::kDisabled || mode_ == MotionMode::kIdle) &&
           fault_ == FaultCode::kNone) {
@@ -526,10 +677,11 @@ void MotionController::processPendingRequest() {
     case CommandType::kDisable:
       break;  // Handled as urgent requests in submitCommand().
   }
+  clear_processed_request();
 }
 
 void MotionController::processMotion(uint32_t now) {
-  if (!isMoving() || stepper_ == nullptr) return;
+  if (center_stop_latched_ || !isMoving() || stepper_ == nullptr) return;
 
   if (isHoming()) {
     const uint32_t timeout = mode_ == MotionMode::kBackoffMin ||
@@ -547,7 +699,8 @@ void MotionController::processMotion(uint32_t now) {
 
   if (mode_ == MotionMode::kHomingMin || mode_ == MotionMode::kHomingMax) {
     const int32_t travelled = std::abs(stepper_->getCurrentPosition() - motion_started_step_);
-    const int32_t limit = core::millimetresToMicrosteps(kHomingDistanceLimitMm, 4);
+    const int32_t limit =
+        core::millimetresToMicrosteps(kHomingDistanceLimitMm, kHomingMicrosteps);
     if (travelled >= limit || !stepper_->isRunning()) {
       enterFault(FaultCode::kHomeFailed, FaultReason::kDistanceExceeded);
     }
@@ -559,12 +712,19 @@ void MotionController::processMotion(uint32_t now) {
     return;
   }
   if (mode_ == MotionMode::kBackoffMax && !stepper_->isRunning()) {
-    finishHoming();
+    startHomingCenter();
     return;
   }
 
   if (mode_ == MotionMode::kMoving) {
     if (!stepper_->isRunning()) {
+      physical_motion_active_ = false;
+      if (center_stop_latched_) return;
+      if (homing_center_active_) {
+        completeHoming();
+        return;
+      }
+      if (!captureAndSynchronizeHomedPosition(false)) return;
       const float final_position = encoderPositionMm();
       if (core::positionOutsideSoftLimits(final_position, kSoftMarginMm,
                                           travel_mm_ - kSoftMarginMm)) {
@@ -573,9 +733,7 @@ void MotionController::processMotion(uint32_t now) {
       }
       requested_velocity_mm_s_ = 0.0F;
       target_position_mm_ = final_position;
-      motion_armed_ = false;
-      motion_monitor_.clear();
-      setSynchronizationAnchor(final_position);
+      button_jog_direction_ = 0;
       mode_ = MotionMode::kIdle;
       return;
     }
@@ -600,8 +758,9 @@ void MotionController::processRollingHardStop(uint32_t now) {
     return;
   }
   const int8_t direction = currentMotionDirection();
-  const int8_t encoder_sign = homed_ ? calibrated_encoder_sign_
-                                    : (config_.invert_encoder ? -1 : 1);
+  const int8_t encoder_sign = encoder_min_counts_ != encoder_max_counts_
+                                  ? calibrated_encoder_sign_
+                                  : (config_.invert_encoder ? -1 : 1);
   core::MotionSample sample;
   sample.time_ms = now;
   sample.commanded_encoder_counts =
@@ -613,8 +772,123 @@ void MotionController::processRollingHardStop(uint32_t now) {
   }
 }
 
+void MotionController::processButtons(uint32_t now) {
+  const bool center_pressed = digitalRead(pins::kButtonCenter) == LOW;
+  const auto update = buttons_.update(digitalRead(pins::kButtonLeft) == LOW,
+                                      center_pressed,
+                                      digitalRead(pins::kButtonRight) == LOW, now);
+
+  if (center_stop_latched_) {
+    if (center_pressed) {
+      center_release_pending_ = false;
+    } else if (!center_release_pending_) {
+      center_release_pending_ = true;
+      center_release_since_ms_ = now;
+    } else if (now - center_release_since_ms_ >= core::kButtonDebounceMs) {
+      portENTER_CRITICAL(&data_mux_);
+      center_stop_latched_ = false;
+      portEXIT_CRITICAL(&data_mux_);
+      center_release_pending_ = false;
+    }
+    return;  // Consume the release that rearms the critical stop.
+  }
+
+  if (buttons_.bothSideButtonsPressed()) {
+    side_buttons_inhibited_ = true;
+    if (button_jog_direction_ != 0) {
+      stopMotionAndResynchronize();
+      button_jog_direction_ = 0;
+      if (fault_ == FaultCode::kNone) mode_ = MotionMode::kIdle;
+    }
+    return;
+  }
+  if (side_buttons_inhibited_) {
+    if (!buttons_.leftPressed() && !buttons_.rightPressed()) {
+      side_buttons_inhibited_ = false;
+    }
+    return;
+  }
+
+  if (button_jog_direction_ < 0 && update.left == core::ButtonEdge::kReleased) {
+    stopMotionAndResynchronize();
+    button_jog_direction_ = 0;
+    if (fault_ == FaultCode::kNone) mode_ = MotionMode::kIdle;
+    return;
+  }
+  if (button_jog_direction_ > 0 && update.right == core::ButtonEdge::kReleased) {
+    stopMotionAndResynchronize();
+    button_jog_direction_ = 0;
+    if (fault_ == FaultCode::kNone) mode_ = MotionMode::kIdle;
+    return;
+  }
+
+  if (update.home_requested && !isMoving()) {
+    portENTER_CRITICAL(&data_mux_);
+    if (!request_in_progress_ && !pending_command_ && !pending_config_) {
+      command_ = Command{};
+      command_.type = CommandType::kHome;
+      pending_command_ = true;
+      queued_button_jog_direction_ = 0;
+    }
+    portEXIT_CRITICAL(&data_mux_);
+    return;
+  }
+
+  const bool left_pressed = update.left == core::ButtonEdge::kPressed;
+  const bool right_pressed = update.right == core::ButtonEdge::kPressed;
+  if ((!left_pressed && !right_pressed) || !homed_ || !encoder_valid_ ||
+      fault_ != FaultCode::kNone || mode_ != MotionMode::kIdle) {
+    return;
+  }
+
+  Command jog;
+  jog.type = CommandType::kVelocity;
+  jog.velocity_mm_s = left_pressed ? -config_.default_speed_mm_s
+                                    : config_.default_speed_mm_s;
+  jog.acceleration_mm_s2 = config_.default_acceleration_mm_s2;
+  portENTER_CRITICAL(&data_mux_);
+  if (!request_in_progress_ && !pending_command_ && !pending_config_) {
+    command_ = jog;
+    pending_command_ = true;
+    queued_button_jog_direction_ = left_pressed ? -1 : 1;
+  }
+  portEXIT_CRITICAL(&data_mux_);
+}
+
+void MotionController::synchronizeIdlePosition() {
+  if (!homed_ || !encoder_valid_ || stepper_ == nullptr ||
+      mode_ != MotionMode::kIdle || stepper_->isRunning()) {
+    return;
+  }
+  const float position_mm = encoderPositionMm();
+  const int32_t physical_steps =
+      core::millimetresToMicrosteps(position_mm, active_microsteps_);
+  if (physical_steps == stepper_->getCurrentPosition()) return;
+
+  stepper_->forceStopAndNewPosition(physical_steps);
+  target_position_mm_ = position_mm;
+  requested_velocity_mm_s_ = 0.0F;
+  motion_monitor_.clear();
+  setSynchronizationAnchor(position_mm);
+}
+
 bool MotionController::enableDriver() {
-  if (stepper_ == nullptr || !checkTmc()) return false;
+  if (stepper_ == nullptr) return false;
+  if (center_stop_latched_ || digitalRead(pins::kButtonCenter) == LOW) {
+    if (isMoving()) {
+      digitalWrite(pins::kTmcEnable, HIGH);
+      stepper_->forceStop();
+      driver_enabled_ = false;
+      motion_armed_ = false;
+      physical_motion_active_ = false;
+      portENTER_CRITICAL(&data_mux_);
+      center_stop_event_ = true;
+      center_stop_latched_ = true;
+      portEXIT_CRITICAL(&data_mux_);
+    }
+    return false;
+  }
+  if (!checkTmc()) return false;
 
   // PG may change after an earlier state snapshot. Check it directly before EN,
   // immediately after EN, and once more after publishing the enabled state.
@@ -622,7 +896,14 @@ bool MotionController::enableDriver() {
     handlePowerLoss();
     return false;
   }
-  stepper_->enableOutputs();
+  if (center_stop_latched_ || digitalRead(pins::kButtonCenter) == LOW) return false;
+  if (!stepper_->enableOutputs()) return false;
+  if (center_stop_latched_ || digitalRead(pins::kButtonCenter) == LOW) {
+    digitalWrite(pins::kTmcEnable, HIGH);
+    stepper_->disableOutputs();
+    driver_enabled_ = false;
+    return false;
+  }
   if (!samplePowerGood()) {
     handlePowerLoss();
     return false;
@@ -635,6 +916,127 @@ bool MotionController::enableDriver() {
   return driver_enabled_;
 }
 
+bool MotionController::armPhysicalMotion() {
+  if (stepper_ == nullptr) return false;
+  physical_motion_active_ = true;
+  if (!center_stop_latched_ && digitalRead(pins::kButtonCenter) != LOW) return true;
+
+  digitalWrite(pins::kTmcEnable, HIGH);
+  stepper_->forceStop();
+  driver_enabled_ = false;
+  motion_armed_ = false;
+  physical_motion_active_ = false;
+  portENTER_CRITICAL(&data_mux_);
+  center_stop_event_ = true;
+  center_stop_latched_ = true;
+  portEXIT_CRITICAL(&data_mux_);
+  return false;
+}
+
+bool MotionController::captureAndSynchronizeHomedPosition(bool enforce_soft_limits) {
+  if (stepper_ == nullptr || !homed_) return false;
+  if (!captureEncoderAfterStop()) {
+    enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
+    return false;
+  }
+  const float position_mm = encoderPositionMm();
+  if (enforce_soft_limits &&
+      core::positionOutsideSoftLimits(position_mm, kSoftMarginMm,
+                                      travel_mm_ - kSoftMarginMm)) {
+    return false;
+  }
+  stepper_->forceStopAndNewPosition(
+      core::millimetresToMicrosteps(position_mm, active_microsteps_));
+  motion_armed_ = false;
+  physical_motion_active_ = false;
+  diag_requires_clear_ = false;
+  requested_velocity_mm_s_ = 0.0F;
+  target_position_mm_ = position_mm;
+  motion_monitor_.clear();
+  setSynchronizationAnchor(position_mm);
+  return true;
+}
+
+bool MotionController::captureStableEncoderPosition() {
+  constexpr uint8_t kRequiredStableSamples = 2;
+  constexpr uint8_t kMaximumSamples = 10;
+  constexpr int32_t kStableCounts = 1;
+
+  if (center_stop_latched_ || !driver_enabled_ || !samplePowerGood() ||
+      !captureEncoderAfterStop()) {
+    return false;
+  }
+  int32_t previous = encoder_counts_;
+  uint8_t stable_samples = 0;
+  for (uint8_t sample = 0; sample < kMaximumSamples; ++sample) {
+    delay(kEncoderSampleMs);
+    if (center_stop_latched_ || !driver_enabled_ || !samplePowerGood() ||
+        !captureEncoderAfterStop()) {
+      return false;
+    }
+    if (std::abs(encoder_counts_ - previous) <= kStableCounts) {
+      if (++stable_samples >= kRequiredStableSamples) return true;
+    } else {
+      stable_samples = 0;
+    }
+    previous = encoder_counts_;
+  }
+  return false;
+}
+
+bool MotionController::prepareNormalMotion() {
+  if (stepper_ == nullptr || !homed_ || !encoder_valid_ ||
+      center_stop_latched_ || digitalRead(pins::kButtonCenter) == LOW) {
+    return false;
+  }
+  if (!captureAndSynchronizeHomedPosition(true)) {
+    disableDriver(false);
+    return false;
+  }
+
+  const bool reengage_freewheel =
+      config_.standstill_mode == StandstillMode::kFreewheeling;
+  const bool was_enabled = driver_enabled_;
+  if (reengage_freewheel) {
+    disableDriver(false);
+    RuntimeConfig engagement = config_;
+    engagement.standstill_mode = StandstillMode::kNormal;
+    applyTmcConfig(engagement);
+  }
+
+  const bool enable_may_align_rotor = reengage_freewheel || !was_enabled;
+  if (enable_may_align_rotor && !armPhysicalMotion()) {
+    if (reengage_freewheel) applyTmcConfig(config_);
+    return false;
+  }
+  if (!enableDriver()) {
+    physical_motion_active_ = false;
+    if (reengage_freewheel) applyTmcConfig(config_);
+    return false;
+  }
+
+  // ENN alone does not guarantee that FREEWHEEL/IHOLD=0 has energized and
+  // aligned the rotor. Temporarily use the normal hold setting and wait for
+  // bounded encoder stability before every powered move from FREEWHEELING.
+  if (reengage_freewheel) {
+    if (!captureStableEncoderPosition()) {
+      applyTmcConfig(config_);
+      disableDriver(false);
+      return false;
+    }
+    applyTmcConfig(config_);
+    if (!checkTmc()) return false;
+  }
+  if (!captureAndSynchronizeHomedPosition(true)) {
+    disableDriver(false);
+    return false;
+  }
+
+  physical_motion_active_ = false;
+  return driver_enabled_ && samplePowerGood() && !center_stop_latched_ &&
+         digitalRead(pins::kButtonCenter) != LOW;
+}
+
 void MotionController::handlePowerLoss() {
   portENTER_CRITICAL(&data_mux_);
   power_event_ = false;
@@ -644,6 +1046,7 @@ void MotionController::handlePowerLoss() {
   if (stepper_ != nullptr) stepper_->forceStop();
   driver_enabled_ = false;
   motion_armed_ = false;
+  physical_motion_active_ = false;
   samplePowerGood();
   captureEncoderAfterStop();
   resynchronizeStepperFromEncoder(0.0F, false);
@@ -653,11 +1056,18 @@ void MotionController::handlePowerLoss() {
 void MotionController::stopMotionAndResynchronize() {
   if (stepper_ == nullptr) return;
   stepper_->forceStop();
-  resynchronizeStepperFromEncoder(0.0F, false);
+  physical_motion_active_ = false;
+  if (homed_) {
+    captureAndSynchronizeHomedPosition(false);
+  } else {
+    captureEncoderAfterStop();
+    resynchronizeStepperFromEncoder(0.0F, false);
+  }
 }
 
 void MotionController::disableDriver(bool invalidate_home) {
   motion_armed_ = false;
+  physical_motion_active_ = false;
   diag_requires_clear_ = false;
   digitalWrite(pins::kTmcEnable, HIGH);
   if (stepper_ != nullptr) stepper_->disableOutputs();
@@ -665,6 +1075,8 @@ void MotionController::disableDriver(bool invalidate_home) {
   motion_monitor_.clear();
   if (invalidate_home) {
     homed_ = false;
+    homing_center_active_ = false;
+    button_jog_direction_ = 0;
     travel_mm_ = 0.0F;
     encoder_min_counts_ = 0;
     encoder_max_counts_ = 0;
@@ -681,10 +1093,14 @@ void MotionController::enterFault(FaultCode code, FaultReason reason) {
   driver_enabled_ = false;
   homed_ = false;
   motion_armed_ = false;
+  physical_motion_active_ = false;
+  homing_center_active_ = false;
+  button_jog_direction_ = 0;
   diag_requires_clear_ = false;
   motion_monitor_.clear();
   portENTER_CRITICAL(&data_mux_);
   pending_command_ = false;
+  queued_button_jog_direction_ = 0;
   pending_config_ = false;
   portEXIT_CRITICAL(&data_mux_);
   fault_ = code;
@@ -703,7 +1119,10 @@ void MotionController::clearFault() {
 }
 
 bool MotionController::startHome() {
-  if (stepper_ == nullptr || isMoving()) return false;
+  if (stepper_ == nullptr || isMoving() || center_stop_latched_ ||
+      digitalRead(pins::kButtonCenter) == LOW) {
+    return false;
+  }
   if (!canHomeFromFault(fault_)) return false;
   if (!encoder_valid_) {
     enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
@@ -713,7 +1132,7 @@ bool MotionController::startHome() {
   disableDriver(true);
   fault_ = FaultCode::kNone;
   fault_reason_ = FaultReason::kNone;
-  applyPdVoltage(12);
+  applyPdVoltage(kHomingPdVoltageV);
   delay(300);
   samplePowerGood();
   if (!power_good_) {
@@ -722,6 +1141,11 @@ bool MotionController::startHome() {
   }
 
   applyHomingConfig();
+  const uint16_t configured_microsteps = core::publicMicrosteps(tmc_.microsteps());
+  if (tmc_.CRCerror || configured_microsteps != kHomingMicrosteps) {
+    enterFault(FaultCode::kTmcComm, FaultReason::kReadFailed);
+    return false;
+  }
   stepper_->forceStopAndNewPosition(0);
   target_position_mm_ = 0.0F;
   setSynchronizationAnchor(0.0F);
@@ -742,7 +1166,10 @@ bool MotionController::startHome() {
 }
 
 void MotionController::startHomingLeg(MotionMode mode, int8_t direction) {
-  setMotionProfile(kHomingSpeedMmS, kHomingAccelerationMmS2);
+  if (!setMotionProfile(kHomingSpeedMmS, kHomingAccelerationMmS2)) {
+    enterFault(FaultCode::kHomeFailed, FaultReason::kReadFailed);
+    return;
+  }
   mode_ = mode;
   motion_started_ms_ = millis();
   motion_started_step_ = stepper_->getCurrentPosition();
@@ -753,7 +1180,12 @@ void MotionController::startHomingLeg(MotionMode mode, int8_t direction) {
   motion_armed_ = false;
   diag_requires_clear_ = false;
   diag_arm_after_ms_ = millis() + 25;
-  stepper_->move(direction * core::millimetresToMicrosteps(kHomingDistanceLimitMm, 4));
+  if (!armPhysicalMotion()) return;
+  if (stepper_->move(direction * core::millimetresToMicrosteps(
+                                  kHomingDistanceLimitMm, kHomingMicrosteps)) != MOVE_OK) {
+    physical_motion_active_ = false;
+    enterFault(FaultCode::kHomeFailed, FaultReason::kReadFailed);
+  }
 }
 
 void MotionController::handleHomingDiag() {
@@ -781,7 +1213,8 @@ void MotionController::handleHomingDiag() {
       enterFault(FaultCode::kHomeFailed, FaultReason::kTravelTooShort);
       return;
     }
-    stepper_->forceStopAndNewPosition(core::millimetresToMicrosteps(travel_mm_, 4));
+    stepper_->forceStopAndNewPosition(
+        core::millimetresToMicrosteps(travel_mm_, kHomingMicrosteps));
     target_position_mm_ = travel_mm_;
     setSynchronizationAnchor(travel_mm_);
     if (!enableDriver()) return;
@@ -792,7 +1225,10 @@ void MotionController::handleHomingDiag() {
 }
 
 void MotionController::startBackoff(MotionMode mode, float target_mm) {
-  setMotionProfile(kHomingSpeedMmS, kHomingAccelerationMmS2);
+  if (!setMotionProfile(kHomingSpeedMmS, kHomingAccelerationMmS2)) {
+    enterFault(FaultCode::kHomeFailed, FaultReason::kReadFailed);
+    return;
+  }
   mode_ = mode;
   motion_started_ms_ = millis();
   motion_started_step_ = stepper_->getCurrentPosition();
@@ -806,14 +1242,58 @@ void MotionController::startBackoff(MotionMode mode, float target_mm) {
   // Do not arm it for the backoff until movement has made it deassert once.
   diag_requires_clear_ = true;
   diag_arm_after_ms_ = millis() + 25;
-  stepper_->moveTo(core::millimetresToMicrosteps(target_mm, 4));
+  if (!armPhysicalMotion()) return;
+  if (stepper_->moveTo(
+          core::millimetresToMicrosteps(target_mm, kHomingMicrosteps)) != MOVE_OK) {
+    physical_motion_active_ = false;
+    enterFault(FaultCode::kHomeFailed, FaultReason::kReadFailed);
+  }
 }
 
-void MotionController::finishHoming() {
-  requested_velocity_mm_s_ = 0.0F;
+void MotionController::startHomingCenter() {
+  if (stepper_ == nullptr || !captureEncoderAfterStop()) {
+    enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
+    return;
+  }
+  const float start_position = encoderPositionMm();
+  stepper_->forceStopAndNewPosition(
+      core::millimetresToMicrosteps(start_position, kHomingMicrosteps));
+  setSynchronizationAnchor(start_position);
+  if (!setMotionProfile(kHomingCenterSpeedMmS, kHomingCenterAccelerationMmS2)) {
+    enterFault(FaultCode::kHomeFailed, FaultReason::kReadFailed);
+    return;
+  }
+
+  homing_center_active_ = true;
+  mode_ = MotionMode::kMoving;
+  motion_started_ms_ = millis();
+  motion_started_step_ = stepper_->getCurrentPosition();
+  target_position_mm_ = travel_mm_ * 0.5F;
+  requested_velocity_mm_s_ = target_position_mm_ > start_position
+                                 ? kHomingCenterSpeedMmS
+                                 : -kHomingCenterSpeedMmS;
+  motion_monitor_.clear();
   motion_armed_ = false;
   diag_requires_clear_ = false;
-  const float final_position = encoderPositionMm();
+  diag_arm_after_ms_ = millis() + 25;
+  if (!armPhysicalMotion()) return;
+  if (stepper_->moveTo(core::millimetresToMicrosteps(
+                           target_position_mm_, kHomingMicrosteps)) != MOVE_OK) {
+    physical_motion_active_ = false;
+    enterFault(FaultCode::kHomeFailed, FaultReason::kReadFailed);
+  }
+}
+
+void MotionController::completeHoming() {
+  if (center_stop_latched_) return;
+  if (stepper_ == nullptr || !captureEncoderAfterStop()) {
+    enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
+    return;
+  }
+  requested_velocity_mm_s_ = 0.0F;
+  motion_armed_ = false;
+  physical_motion_active_ = false;
+  diag_requires_clear_ = false;
   digitalWrite(pins::kTmcEnable, HIGH);
   stepper_->disableOutputs();
   driver_enabled_ = false;
@@ -822,35 +1302,61 @@ void MotionController::finishHoming() {
   delay(250);
   active_microsteps_ = config_.microsteps;
   applyTmcConfig(config_);
+  const uint16_t configured_microsteps = core::publicMicrosteps(tmc_.microsteps());
+  if (tmc_.CRCerror || configured_microsteps != config_.microsteps) {
+    enterFault(FaultCode::kTmcComm, FaultReason::kReadFailed);
+    return;
+  }
   setDirectionPolarity();
-  samplePowerGood();
-  if (!power_good_) {
+  if (!checkTmc()) return;
+  if (!samplePowerGood()) {
     enterFault(FaultCode::kPowerLoss, FaultReason::kPowerGoodLost);
     return;
   }
+
+  if (!captureEncoderAfterStop()) {
+    enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
+    return;
+  }
+  if (center_stop_latched_) return;
+  const float final_position = encoderPositionMm();
   stepper_->forceStopAndNewPosition(
       core::millimetresToMicrosteps(final_position, active_microsteps_));
   homed_ = true;
   setSynchronizationAnchor(final_position);
-  if (!enableDriver()) return;
-  target_position_mm_ = final_position;
+  if (!enableDriver()) {
+    if (center_stop_latched_) return;
+    if (fault_ == FaultCode::kNone) {
+      enterFault(FaultCode::kHomeFailed, FaultReason::kReadFailed);
+    }
+    return;
+  }
+  if (!captureAndSynchronizeHomedPosition(true)) {
+    if (fault_ == FaultCode::kNone) {
+      enterFault(FaultCode::kHomeFailed, FaultReason::kReadFailed);
+    }
+    return;
+  }
+  target_position_mm_ = encoderPositionMm();
   fault_ = FaultCode::kNone;
   fault_reason_ = FaultReason::kNone;
+  homing_center_active_ = false;
   mode_ = MotionMode::kIdle;
-
-  Command center;
-  center.type = CommandType::kMove;
-  center.position_mm = travel_mm_ * 0.5F;
-  startPositionMove(center);
 }
 
-void MotionController::startPositionMove(const Command& command) {
+void MotionController::startPositionMove(const Command& command, int8_t button_direction) {
   if (!core::closedLoopMotionReady(homed_, encoder_valid_) ||
       fault_ != FaultCode::kNone || mode_ != MotionMode::kIdle) {
     return;
   }
-  setMotionProfile(command.speed_mm_s, command.acceleration_mm_s2);
-  if (!enableDriver()) return;
+  if (!prepareNormalMotion() ||
+      !setMotionProfile(command.speed_mm_s, command.acceleration_mm_s2)) {
+    return;
+  }
+  if ((button_direction < 0 && digitalRead(pins::kButtonLeft) != LOW) ||
+      (button_direction > 0 && digitalRead(pins::kButtonRight) != LOW)) {
+    return;
+  }
   target_position_mm_ = command.position_mm;
   requested_velocity_mm_s_ = command.position_mm > encoderPositionMm()
                                  ? command.speed_mm_s
@@ -863,28 +1369,37 @@ void MotionController::startPositionMove(const Command& command) {
   motion_armed_ = false;
   diag_requires_clear_ = false;
   diag_arm_after_ms_ = millis() + 25;
-  stepper_->moveTo(core::millimetresToMicrosteps(command.position_mm, active_microsteps_));
+  if (!armPhysicalMotion()) return;
+  if (stepper_->moveTo(
+          core::millimetresToMicrosteps(command.position_mm, active_microsteps_)) !=
+      MOVE_OK) {
+    physical_motion_active_ = false;
+    requested_velocity_mm_s_ = 0.0F;
+    target_position_mm_ = encoderPositionMm();
+    mode_ = MotionMode::kIdle;
+  }
 }
 
-void MotionController::startVelocityMove(const Command& command) {
+void MotionController::startVelocityMove(const Command& command, int8_t button_direction) {
   Command finite_move = command;
   finite_move.type = CommandType::kMove;
   finite_move.position_mm = command.velocity_mm_s > 0
                                 ? travel_mm_ - kSoftMarginMm
                                 : kSoftMarginMm;
   finite_move.speed_mm_s = std::fabs(command.velocity_mm_s);
-  startPositionMove(finite_move);
+  startPositionMove(finite_move, button_direction);
 }
 
-void MotionController::setMotionProfile(float speed_mm_s, float acceleration_mm_s2) {
+bool MotionController::setMotionProfile(float speed_mm_s, float acceleration_mm_s2) {
+  if (stepper_ == nullptr) return false;
   const uint32_t speed_steps = static_cast<uint32_t>(std::max(
       1L, static_cast<long>(std::lround(speed_mm_s * core::kFullStepsPerRevolution *
                                        active_microsteps_ / core::kMillimetresPerRevolution))));
   const int32_t acceleration_steps = static_cast<int32_t>(std::max(
       1L, static_cast<long>(std::lround(acceleration_mm_s2 * core::kFullStepsPerRevolution *
                                        active_microsteps_ / core::kMillimetresPerRevolution))));
-  stepper_->setSpeedInHz(speed_steps);
-  stepper_->setAcceleration(acceleration_steps);
+  return stepper_->setSpeedInHz(speed_steps) == 0 &&
+         stepper_->setAcceleration(acceleration_steps) == 0;
 }
 
 bool MotionController::submitCommand(const Command& command, const char*& error_code) {
@@ -904,7 +1419,12 @@ bool MotionController::submitCommand(const Command& command, const char*& error_
 
   portENTER_CRITICAL(&data_mux_);
   const StateSnapshot published = state_;
-  if (pending_command_ || pending_config_) {
+  if (center_stop_latched_) {
+    portEXIT_CRITICAL(&data_mux_);
+    error_code = "STATE_CONFLICT";
+    return false;
+  }
+  if (request_in_progress_ || pending_command_ || pending_config_) {
     portEXIT_CRITICAL(&data_mux_);
     error_code = "BUSY";
     return false;
@@ -924,6 +1444,13 @@ bool MotionController::submitCommand(const Command& command, const char*& error_
     error_code = !published.homed ? "NOT_HOMED" : "STATE_CONFLICT";
     return false;
   }
+  if ((command.type == CommandType::kMove || command.type == CommandType::kVelocity) &&
+      core::positionOutsideSoftLimits(published.position_mm, published.soft_min_mm,
+                                      published.soft_max_mm)) {
+    portEXIT_CRITICAL(&data_mux_);
+    error_code = "OUTSIDE_SOFT_LIMITS";
+    return false;
+  }
   if (command.type == CommandType::kMove &&
       (!std::isfinite(command.position_mm) ||
        command.position_mm < published.soft_min_mm ||
@@ -935,9 +1462,9 @@ bool MotionController::submitCommand(const Command& command, const char*& error_
   if (command.type == CommandType::kMove &&
       (!std::isfinite(command.speed_mm_s) ||
        !std::isfinite(command.acceleration_mm_s2) || command.speed_mm_s <= 0 ||
-       command.speed_mm_s > kMaxNormalSpeedMmS ||
+       command.speed_mm_s > runtime::kMaxSpeedMmS ||
        command.acceleration_mm_s2 <= 0 ||
-       command.acceleration_mm_s2 > kMaxNormalAccelerationMmS2)) {
+       command.acceleration_mm_s2 > runtime::kMaxAccelerationMmS2)) {
     portEXIT_CRITICAL(&data_mux_);
     error_code = "INVALID_MOTION_PROFILE";
     return false;
@@ -946,9 +1473,9 @@ bool MotionController::submitCommand(const Command& command, const char*& error_
       (!std::isfinite(command.velocity_mm_s) ||
        !std::isfinite(command.acceleration_mm_s2) ||
        std::fabs(command.velocity_mm_s) < 0.001F ||
-       std::fabs(command.velocity_mm_s) > kMaxNormalSpeedMmS ||
+       std::fabs(command.velocity_mm_s) > runtime::kMaxSpeedMmS ||
        command.acceleration_mm_s2 <= 0 ||
-       command.acceleration_mm_s2 > kMaxNormalAccelerationMmS2)) {
+       command.acceleration_mm_s2 > runtime::kMaxAccelerationMmS2)) {
     portEXIT_CRITICAL(&data_mux_);
     error_code = "INVALID_MOTION_PROFILE";
     return false;
@@ -997,6 +1524,7 @@ bool MotionController::submitCommand(const Command& command, const char*& error_
     return false;
   }
   command_ = command;
+  queued_button_jog_direction_ = 0;
   pending_command_ = true;
   portEXIT_CRITICAL(&data_mux_);
   return true;
@@ -1010,7 +1538,8 @@ bool MotionController::submitConfig(const RuntimeConfig& value, const char*& err
   }
   portENTER_CRITICAL(&data_mux_);
   const MotionMode published_mode = state_.mode;
-  if (pending_command_ || pending_config_ ||
+  if (center_stop_latched_ || request_in_progress_ || pending_command_ ||
+      pending_config_ ||
       (published_mode != MotionMode::kDisabled && published_mode != MotionMode::kIdle) ||
       state_.fault != FaultCode::kNone) {
     portEXIT_CRITICAL(&data_mux_);
@@ -1070,7 +1599,8 @@ void MotionController::updateSnapshot() {
 }
 
 bool MotionController::isHoming() const {
-  return mode_ == MotionMode::kHomingMin || mode_ == MotionMode::kBackoffMin ||
+  return homing_center_active_ || mode_ == MotionMode::kHomingMin ||
+         mode_ == MotionMode::kBackoffMin ||
          mode_ == MotionMode::kHomingMax || mode_ == MotionMode::kBackoffMax;
 }
 

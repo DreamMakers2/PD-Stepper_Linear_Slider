@@ -46,6 +46,10 @@ void startWifi() {
 void setup() {
   pinMode(slider::pins::kTmcEnable, OUTPUT);
   digitalWrite(slider::pins::kTmcEnable, HIGH);
+  pinMode(slider::pins::kLed1, OUTPUT);
+  pinMode(slider::pins::kLed2, OUTPUT);
+  digitalWrite(slider::pins::kLed1, LOW);
+  digitalWrite(slider::pins::kLed2, LOW);
   delay(200);
   Serial.begin(115200);
   Serial.println("PD-Stepper linear slider starting");
