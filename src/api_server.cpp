@@ -1,6 +1,10 @@
 #include "api_server.h"
+#include "wifi_config.h"
 
 #include <ArduinoJson.h>
+#ifdef SLIDER_SESSION_OTA_TOKEN
+#include <Update.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 
@@ -8,6 +12,13 @@ namespace slider {
 namespace {
 
 constexpr std::size_t kMaxJsonBodyBytes = 1024;
+
+#ifdef SLIDER_SESSION_OTA_TOKEN
+bool sessionAuthorized(AsyncWebServerRequest* request) {
+  const AsyncWebHeader* header = request->getHeader("X-Session-Token");
+  return header != nullptr && header->value() == SLIDER_SESSION_OTA_TOKEN;
+}
+#endif
 
 int controllerErrorStatus(const char* code) {
   if (code == nullptr) return 400;
@@ -42,6 +53,53 @@ void ApiServer::begin() {
       [this](AsyncWebServerRequest* request) { parseBufferedBody(request, true); }, nullptr,
       [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index,
              size_t total) { bufferRequestBody(request, data, len, index, total); });
+
+#ifdef SLIDER_SESSION_OTA_TOKEN
+  server_.on(
+      "/api/session/firmware", HTTP_POST,
+      [](AsyncWebServerRequest* request) {
+        if (request->getResponse() != nullptr) return;
+        if (!sessionAuthorized(request)) {
+          request->send(403, "application/json", "{\"ok\":false,\"error\":\"FORBIDDEN\"}");
+          return;
+        }
+        if (!Update.isFinished() || Update.hasError()) {
+          request->send(500, "application/json",
+                        "{\"ok\":false,\"error\":\"UPDATE_FAILED\"}");
+          return;
+        }
+        request->onDisconnect([]() { ESP.restart(); });
+        request->send(200, "application/json", "{\"ok\":true,\"restarting\":true}");
+      },
+      [this](AsyncWebServerRequest* request, String, size_t index, uint8_t* data,
+             size_t len, bool final) {
+        if (request->getResponse() != nullptr || !sessionAuthorized(request)) return;
+        if (index == 0) {
+          const StateSnapshot state = controller_.snapshot();
+          if (state.enabled || (state.mode != MotionMode::kDisabled &&
+                                state.mode != MotionMode::kFaulted)) {
+            request->send(409, "application/json",
+                          "{\"ok\":false,\"error\":\"STATE_CONFLICT\"}");
+            return;
+          }
+          if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+            request->send(500, "application/json",
+                          "{\"ok\":false,\"error\":\"UPDATE_BEGIN_FAILED\"}");
+            return;
+          }
+        }
+        if (Update.write(data, len) != len) {
+          Update.abort();
+          request->send(500, "application/json",
+                        "{\"ok\":false,\"error\":\"UPDATE_WRITE_FAILED\"}");
+          return;
+        }
+        if (final && !Update.end(true)) {
+          request->send(500, "application/json",
+                        "{\"ok\":false,\"error\":\"UPDATE_END_FAILED\"}");
+        }
+      });
+#endif
 
   server_.onNotFound([this](AsyncWebServerRequest* request) {
     sendError(request, 404, "NOT_FOUND", "API route not found");

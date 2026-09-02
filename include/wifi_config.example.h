@@ -8,3 +8,6 @@
 
 // Used only if the station connection fails. WPA2 requires at least 8 chars.
 #define SLIDER_FALLBACK_AP_PASSWORD "change-this-password"
+
+// Optional session-only maintenance. Leave undefined for normal builds.
+// #define SLIDER_SESSION_OTA_TOKEN "replace-with-a-long-random-token"

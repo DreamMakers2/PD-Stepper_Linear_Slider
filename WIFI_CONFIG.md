@@ -15,3 +15,11 @@ cp include/wifi_config.example.h include/wifi_config.h
 ```
 
 At boot the controller tries station mode for 10 seconds. If the SSID is left as `your-wifi-name` or the connection fails, it creates a password-protected `PD-Stepper-xxxx` access point. Its API address is `http://192.168.4.1`; both station and fallback addresses are printed to the PlatformIO serial monitor.
+
+For a temporary maintenance build, optionally add a long random OTA token to the ignored local file:
+
+```cpp
+#define SLIDER_SESSION_OTA_TOKEN "replace-with-a-long-random-token"
+```
+
+When this definition is absent, `/api/session/firmware` is not compiled into the firmware. When present, the route requires the matching `X-Session-Token` header and accepts uploads only while the motor is disabled and the controller is `DISABLED` or `FAULTED`. Never put the real token in `wifi_config.example.h`, documentation, commits, or tags.

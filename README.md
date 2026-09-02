@@ -4,6 +4,8 @@ Firmware for a belt-driven linear slider using the PD-Stepper V1.1, a 1.8° NEMA
 
 The controller intentionally has no webpage. It also does not implement compatibility aliases for the original firmware URLs.
 
+The `sensorless-homing-12v-working-tested` milestone is hardware-tested on the assembled slider: both sensorless endpoint stops and 5 mm backoffs completed cleanly, encoder-calibrated travel was 471.93 mm, and the automatic midpoint move finished within 0.08 mm of center.
+
 ## Before building
 
 1. Install the PlatformIO IDE extension in VS Code.
@@ -16,7 +18,7 @@ The project pins the ESP32 Arduino toolchain and motion/driver/network dependenc
 ## Safety model
 
 - Every boot drives TMC `ENN` high before the startup delay and starts disabled and unhomed. Position and velocity commands are rejected until homing succeeds.
-- Homing uses the validated fixed 12 V profile: 800 mA RMS, 4x microstepping, 1000 microsteps/s (50 mm/s), 1500 microsteps/s², StallGuard threshold 100, and TCOOLTHRS 210. Each seek is independently limited to 500 mm and 15 seconds.
+- Homing uses the validated fixed 12 V profile: 800 mA RMS, 4× microstepping, 1000 microsteps/s (50 mm/s), 1500 microsteps/s², StallGuard threshold 100, and TCOOLTHRS 210. Each seek is independently limited to 500 mm and 15 seconds; each backoff is limited to 2 seconds.
 - Before the first homing move, StealthChop is powered at the full 800 mA run-current scale for 150 ms so its standstill auto-tuning completes at 12 V.
 - Detected physical endpoints are measured from the unwrapped AS5600 values. After both endpoint backoffs, the carriage moves to the calibrated midpoint. The normal commandable range keeps 5 mm away from each physical endpoint, with 0.2 mm of fault-check tolerance for encoder and microstep rounding.
 - DIAG and power-good loss immediately disable EN and force-stop FastAccelStepper. The queued step position is then replaced with an encoder-derived position.
@@ -40,6 +42,8 @@ curl http://CONTROLLER_IP/api/state
 
 The result includes mode, homing state, encoder and commanded position, calibrated physical and soft limits, active fault/reason, power-good, VBUS, AS5600 counts, DIAG, and the TMC status from the most recent readiness check. Existing detailed UART keys remain in the response but are not continuously tracked.
 
+Modes are `DISABLED`, `IDLE`, `MOVING`, `HOMING_MIN`, `BACKOFF_MIN`, `HOMING_MAX`, `BACKOFF_MAX`, and `FAULTED`. Fault codes are `HOME_FAILED`, `ENCODER_HARD_STOP`, `ENCODER_FAULT`, `TMC_COMM`, `TMC_DRIVER`, `POWER_LOSS`, `TRAVEL_LIMIT`, and `UNEXPECTED_STALL`; `fault.reason` provides the specific cause.
+
 ### Home and move
 
 ```sh
@@ -57,6 +61,8 @@ curl -X POST http://CONTROLLER_IP/api/command \
 ```
 
 Position move speed and acceleration default to 40 mm/s and 75 mm/s² and may be reduced per command. A velocity command is implemented as a finite position move toward the appropriate calibrated soft limit at the requested speed. It reports `MOVING` and returns normally to `IDLE` at the limit without raising `TRAVEL_LIMIT` or invalidating homing.
+
+`home` is asynchronous. Successful completion means the controller has measured both unwrapped encoder endpoints, backed away 5 mm from each stop, set `homed: true`, moved to half the calibrated travel, and returned to `IDLE` without a fault.
 
 ### Stop, enable, disable, and reset
 
@@ -87,11 +93,25 @@ curl -X PUT http://CONTROLLER_IP/api/config \
   }'
 ```
 
-Supported voltages are 5, 9, and 12 V. The default and homing voltage is 12 V; higher PD voltages are rejected. Microsteps are 1, 2, 4, 8, 16, 32, 64, 128, or 256. Standstill modes are `NORMAL`, `FREEWHEELING`, `BRAKING`, and `STRONG_BRAKING`. Configuration is persistent, but homing/calibration is not.
+Supported voltages are 5, 9, and 12 V. The default and homing voltage is 12 V; higher PD voltages are rejected. Current accepts 100–2000 mA, StallGuard accepts 0–255, and microsteps may be 1, 2, 4, 8, 16, 32, 64, 128, or 256. Standstill modes are `NORMAL`, `FREEWHEELING`, `BRAKING`, and `STRONG_BRAKING`. Configuration is persistent, but homing/calibration is not.
 
 The general StallGuard configuration remains available for the preserved driver controls, but homing always overrides it with the fixed validated threshold above.
 
 The API accepts 100–2000 mA because that is the driver-level range used for validation; this is not a claim that every motor or an uncooled board can safely run at 2 A. Set no more than the motor rating and reduce current if the board or motor becomes hot.
+
+### Optional session OTA maintenance
+
+OTA is not part of the normal public control API and is absent unless the local, Git-ignored `include/wifi_config.h` defines `SLIDER_SESSION_OTA_TOKEN`. The currently tested board was built with this option active. Use a long random token, perform the first installation over USB, and keep the token out of tracked files.
+
+An OTA upload is accepted only while the driver is disabled and the controller is `DISABLED` or `FAULTED`. It writes the normal inactive application slot and reboots after a successful upload; it does not erase flash or change the bootloader or partition layout.
+
+```sh
+curl -X POST http://CONTROLLER_IP/api/session/firmware \
+  -H "X-Session-Token: $SLIDER_OTA_TOKEN" \
+  -F 'firmware=@.pio/build/pd_stepper/firmware.bin;type=application/octet-stream'
+```
+
+Missing or incorrect authorization returns HTTP 403; an unsafe controller state returns HTTP 409. Remove the token definition and reinstall over USB or an already-authorized session to omit the route from future firmware.
 
 ## First commissioning
 
@@ -99,7 +119,7 @@ The API accepts 100–2000 mA because that is the driver-level range used for va
 2. With the mechanism uncoupled, issue a slow move only after a controlled homing test fixture or confirm direction during a guarded homing attempt. Set `invert_direction` if logical MIN is wrong.
 3. Turn the motor slowly by hand while disabled and confirm unwrapped encoder counts change continuously through wraparound. Use `invert_encoder` if pre-calibration movement comparison runs opposite to commanded steps.
 4. Verify DIAG disables EN at the first stop and that state reports an endpoint transition or latched unexpected-stall fault.
-5. Couple the belt with clear access to power removal. Home once while watching the carriage and serial/state output. Confirm measured travel is close to the expected 470 mm and soft limits are 5 mm inside both stops.
+5. Couple the belt with clear access to power removal. Home once while watching the carriage and serial/state output. Confirm measured travel is close to the expected 470 mm, soft limits are 5 mm inside both stops, and the final position is approximately half the measured travel.
 6. Test `stop`, PG power removal, TMC UART disconnection during an enable attempt, and encoder obstruction at low mechanical risk before unattended use.
 
 ## Development checks
