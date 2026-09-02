@@ -7,6 +7,14 @@ using slider::core::EncoderHardStopMonitor;
 using slider::core::MotionSample;
 using slider::core::SynchronizationAnchor;
 
+void test_pd_voltage_is_capped_at_12_volts() {
+  TEST_ASSERT_TRUE(slider::core::isSupportedPdVoltage(5));
+  TEST_ASSERT_TRUE(slider::core::isSupportedPdVoltage(9));
+  TEST_ASSERT_TRUE(slider::core::isSupportedPdVoltage(12));
+  TEST_ASSERT_FALSE(slider::core::isSupportedPdVoltage(15));
+  TEST_ASSERT_FALSE(slider::core::isSupportedPdVoltage(20));
+}
+
 void test_physical_unit_conversions() {
   TEST_ASSERT_FLOAT_WITHIN(0.001F, 40.0F,
                            slider::core::microstepsToMillimetres(800, 4));
@@ -149,6 +157,7 @@ void test_closed_loop_motion_requires_a_currently_valid_encoder() {
 
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_pd_voltage_is_capped_at_12_volts);
   RUN_TEST(test_physical_unit_conversions);
   RUN_TEST(test_encoder_unwraps_in_both_directions);
   RUN_TEST(test_travel_is_derived_from_encoder_endpoint_delta);

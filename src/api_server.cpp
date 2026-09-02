@@ -126,7 +126,7 @@ void ApiServer::handleGetConfig(AsyncWebServerRequest* request) {
   root["invert_encoder"] = config.invert_encoder;
 
   JsonObject homing = root["homing"].to<JsonObject>();
-  homing["pd_voltage_v"] = 15;
+  homing["pd_voltage_v"] = 12;
   homing["run_current_ma"] = 800;
   homing["microsteps"] = 4;
   homing["speed_microsteps_s"] = 800;
@@ -238,8 +238,8 @@ void ApiServer::handlePutConfig(AsyncWebServerRequest* request, JsonVariant& jso
   const JsonVariantConst pd_voltage = body["pd_voltage_v"];
   if (!pd_voltage.isNull()) {
     const int value = pd_voltage.as<int>();
-    if (value < 0 || value > 255) {
-      sendError(request, 400, "INVALID_CONFIG", "pd_voltage_v is invalid");
+    if (!core::isSupportedPdVoltage(value)) {
+      sendError(request, 400, "INVALID_CONFIG", "pd_voltage_v must be 5, 9, or 12");
       return;
     }
     config.pd_voltage_v = static_cast<uint8_t>(value);

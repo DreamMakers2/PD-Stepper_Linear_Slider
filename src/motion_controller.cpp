@@ -29,10 +29,6 @@ bool isSupportedMicrosteps(uint16_t value) {
   }
 }
 
-bool isSupportedVoltage(uint8_t value) {
-  return value == 5 || value == 9 || value == 12 || value == 15 || value == 20;
-}
-
 bool canHomeFromFault(FaultCode fault) {
   return fault == FaultCode::kNone || fault == FaultCode::kHomeFailed ||
          fault == FaultCode::kEncoderHardStop ||
@@ -153,7 +149,7 @@ void MotionController::saveConfig() {
 }
 
 bool MotionController::validateConfig(const RuntimeConfig& value) const {
-  return isSupportedVoltage(value.pd_voltage_v) &&
+  return core::isSupportedPdVoltage(value.pd_voltage_v) &&
          value.run_current_ma >= 100 && value.run_current_ma <= 2000 &&
          isSupportedMicrosteps(value.microsteps) &&
          static_cast<uint8_t>(value.standstill_mode) <= 3;
@@ -168,8 +164,8 @@ void MotionController::applyPdVoltage(uint8_t voltage) {
     return;
   }
   digitalWrite(pins::kPdCfg1, LOW);
-  digitalWrite(pins::kPdCfg2, voltage == 15 || voltage == 20 ? HIGH : LOW);
-  digitalWrite(pins::kPdCfg3, voltage == 12 || voltage == 15 ? HIGH : LOW);
+  digitalWrite(pins::kPdCfg2, LOW);
+  digitalWrite(pins::kPdCfg3, voltage == 12 ? HIGH : LOW);
 }
 
 void MotionController::applyTmcConfig(const RuntimeConfig& value) {
@@ -186,7 +182,7 @@ void MotionController::applyTmcConfig(const RuntimeConfig& value) {
 
 void MotionController::applyHomingConfig() {
   RuntimeConfig homing = config_;
-  homing.pd_voltage_v = 15;
+  homing.pd_voltage_v = 12;
   homing.run_current_ma = 800;
   homing.microsteps = 4;
   homing.stallguard_threshold = 20;
@@ -412,7 +408,6 @@ void MotionController::processEmergencyEvents() {
     // stopped by the ISR. This is the reference used to repair FAS's position.
     captureEncoderAfterStop();
     driver_enabled_ = false;
-    delay(25);
     resynchronizeStepperFromEncoder(0.0F, false);
     if (!encoder_valid_) enterFault(FaultCode::kEncoderFault, FaultReason::kReadFailed);
     else if (isHoming()) {
@@ -709,7 +704,7 @@ bool MotionController::startHome() {
   disableDriver(true);
   fault_ = FaultCode::kNone;
   fault_reason_ = FaultReason::kNone;
-  applyPdVoltage(15);
+  applyPdVoltage(12);
   delay(300);
   samplePowerGood();
   if (!power_good_) {

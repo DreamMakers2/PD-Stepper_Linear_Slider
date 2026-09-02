@@ -76,7 +76,7 @@ curl http://CONTROLLER_IP/api/config
 curl -X PUT http://CONTROLLER_IP/api/config \
   -H 'Content-Type: application/json' \
   -d '{
-    "pd_voltage_v":15,
+    "pd_voltage_v":12,
     "run_current_ma":800,
     "microsteps":4,
     "stallguard_threshold":20,
@@ -86,13 +86,13 @@ curl -X PUT http://CONTROLLER_IP/api/config \
   }'
 ```
 
-Supported voltages are 5, 9, 12, 15, and 20 V. Microsteps are 1, 2, 4, 8, 16, 32, 64, 128, or 256. Standstill modes are `NORMAL`, `FREEWHEELING`, `BRAKING`, and `STRONG_BRAKING`. Configuration is persistent, but homing/calibration is not.
+Supported voltages are 5, 9, and 12 V. The default and homing voltage is 12 V; higher PD voltages are rejected. Microsteps are 1, 2, 4, 8, 16, 32, 64, 128, or 256. Standstill modes are `NORMAL`, `FREEWHEELING`, `BRAKING`, and `STRONG_BRAKING`. Configuration is persistent, but homing/calibration is not.
 
 The API accepts 100–2000 mA because that is the driver-level range used for validation; this is not a claim that every motor or an uncooled board can safely run at 2 A. Set no more than the motor rating and reduce current if the board or motor becomes hot.
 
 ## First commissioning
 
-1. Power from a USB-PD supply supporting 15 V and check `/api/state`: `power.good`, encoder validity, TMC UART `ok`, and VBUS should be plausible.
+1. Power from a USB-PD supply supporting 12 V and check `/api/state`: `power.good`, encoder validity, TMC UART `ok`, and VBUS should be plausible.
 2. With the mechanism uncoupled, issue a slow move only after a controlled homing test fixture or confirm direction during a guarded homing attempt. Set `invert_direction` if logical MIN is wrong.
 3. Turn the motor slowly by hand while disabled and confirm unwrapped encoder counts change continuously through wraparound. Use `invert_encoder` if pre-calibration movement comparison runs opposite to commanded steps.
 4. Verify DIAG disables EN at the first stop and that state reports an endpoint transition or latched unexpected-stall fault.

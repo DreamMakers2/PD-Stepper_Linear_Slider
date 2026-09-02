@@ -9,6 +9,10 @@ constexpr int32_t kFullStepsPerRevolution = 200;
 constexpr float kMillimetresPerRevolution = 40.0F;
 constexpr int32_t kHardStopErrorCounts = 164;
 
+constexpr bool isSupportedPdVoltage(int voltage) {
+  return voltage == 5 || voltage == 9 || voltage == 12;
+}
+
 float encoderCountsToMillimetres(int32_t counts);
 int32_t millimetresToEncoderCounts(float millimetres);
 float microstepsToMillimetres(int32_t microsteps, uint16_t microsteps_per_step);

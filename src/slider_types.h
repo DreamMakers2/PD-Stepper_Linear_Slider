@@ -60,7 +60,7 @@ enum class CommandType : uint8_t {
 };
 
 struct RuntimeConfig {
-  uint8_t pd_voltage_v = 15;
+  uint8_t pd_voltage_v = 12;
   uint16_t run_current_ma = 800;
   uint16_t microsteps = 4;
   uint8_t stallguard_threshold = 20;
